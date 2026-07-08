@@ -1,12 +1,13 @@
-//! P2 red-team suite (docs/09-roadmap.md P2 acceptance gates).
+//! P2 policy-enforcement suite (docs/09-roadmap.md P2 acceptance gates).
 //!
-//! Each attack class has >= 2 cases; every one must be blocked:
+//! Verifies the kernel's security guarantees hold: each guarantee category
+//! has >= 2 denial-path cases, and every one must be denied by the kernel:
 //!
-//! - T1 token forgery / tampering / expiry
-//! - T2 privilege escalation (scope upgrade, cross-origin action)
-//! - T3 vault credential leakage (journal / snapshot / ABI return scanned)
-//! - T4 network-rule bypass
-//! - T5 approval bypass (deny / timeout) + approval e2e (suspend -> approve -> resume)
+//! - T1 token integrity (unknown signing key / modified payload / expiry all rejected)
+//! - T2 scope containment (calls beyond the granted scope are denied, incl. cross-origin)
+//! - T3 vault confidentiality (secrets never appear in journal / snapshot / ABI returns)
+//! - T4 network-rule enforcement (unlisted hosts are blocked)
+//! - T5 approval enforcement (deny / timeout paths) + approval e2e (suspend -> approve -> resume)
 //!
 //! Plus: exhaustive no-scope sweep -> every privileged method -> E_CAP_DENIED.
 
@@ -99,7 +100,7 @@ async fn spawned_pid(d: &Dispatcher) -> String {
     pid
 }
 
-// ================= T1: token forgery / tampering / expiry =================
+// ================= T1: token integrity =================
 
 #[test]
 fn t1_foreign_key_signature_rejected() {
@@ -121,7 +122,7 @@ fn t1_foreign_key_signature_rejected() {
 }
 
 #[test]
-fn t1_tampered_payload_rejected() {
+fn t1_modified_payload_rejected() {
     let k = kernel();
     let token = k.security().issue(&TokenClaims {
         subject: "agent:x".into(),
@@ -136,10 +137,10 @@ fn t1_tampered_payload_rejected() {
     payload[3] ^= 0x01;
     let mutated = String::from_utf8_lossy(&payload).into_owned();
     parts[1] = &mutated;
-    let tampered = parts.join(".");
+    let modified = parts.join(".");
     assert!(
-        k.security().verify(&tampered).is_err(),
-        "tampered token must fail"
+        k.security().verify(&modified).is_err(),
+        "modified token must fail verification"
     );
 }
 
@@ -169,7 +170,7 @@ fn t1_garbage_tokens_rejected() {
     }
 }
 
-// ================= T2: privilege escalation =================
+// ================= T2: scope containment =================
 
 #[tokio::test]
 async fn t2_view_only_cannot_exec_js() {
@@ -196,7 +197,7 @@ async fn t2_cross_origin_navigation_denied() {
         &d,
         &scoped,
         "nav.goto",
-        json!({ "pid": pid, "url": "http://evil.test/" }),
+        json!({ "pid": pid, "url": "http://other-origin.test/" }),
     )
     .await;
     assert_eq!(err_code(&resp), "E_CAP_DENIED");
@@ -219,7 +220,7 @@ async fn t2_read_scope_cannot_write_state() {
 
 #[tokio::test]
 async fn t2_vault_is_write_only_even_with_read_scope() {
-    // Even a caller granted state:read:vault cannot exfiltrate vault contents.
+    // Even a caller granted state:read:vault cannot read vault contents back.
     let d = dispatcher();
     let reader = caller(
         "agent:reader",
@@ -236,7 +237,7 @@ async fn t2_vault_is_write_only_even_with_read_scope() {
     assert_eq!(err_code(&resp), "E_CAP_DENIED");
 }
 
-// ================= T3: vault credential leakage =================
+// ================= T3: vault confidentiality =================
 
 const SECRET: &str = "hunter2-SUPER-SECRET-a1b2c3";
 
@@ -304,7 +305,7 @@ async fn t3_vault_ref_secret_absent_from_snapshot_and_return() {
     );
 }
 
-// ================= T4: network-rule bypass =================
+// ================= T4: network-rule enforcement =================
 
 fn req(host: &str) -> NetRequestSummary {
     NetRequestSummary {
@@ -325,7 +326,7 @@ async fn t4_global_deny_all_blocks_every_host() {
             rules: vec![],
         },
     );
-    for host in ["api.test", "cdn.test", "evil.test"] {
+    for host in ["api.test", "cdn.test", "unlisted.test"] {
         assert!(
             !d.kernel().netstack().decide(&pid, &req(host)).allowed(),
             "deny-all must block {host}"
@@ -360,7 +361,7 @@ async fn t4_allowlist_blocks_unlisted_host() {
     assert!(
         !d.kernel()
             .netstack()
-            .decide(&pid, &req("evil.test"))
+            .decide(&pid, &req("unlisted.test"))
             .allowed(),
         "unlisted host must be blocked"
     );

@@ -155,7 +155,7 @@ mod tests {
             "proc allowlist hit"
         );
         assert!(
-            !stack.decide(&p, &req("evil.test")).allowed(),
+            !stack.decide(&p, &req("unlisted.test")).allowed(),
             "global deny still applies"
         );
         assert!(

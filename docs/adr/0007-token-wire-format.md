@@ -7,7 +7,7 @@
 ## 背景
 
 P2 将 capability 从设计提升为全量强制。Gateway 接受连接时必须校验一枚由内核签发、
-不可伪造、可离线自证、便于人读排障的令牌。约束：
+完整性受签名保护（第三方无法构造有效令牌）、可离线自证、便于人读排障的令牌。约束：
 
 - 无外部信任方（内核自持签发密钥），不引入 PKI/JWKS 基础设施
 - 载荷需承载 `subject / scopes / constraints(expires_at, rate, approval) / issued_by`
@@ -31,7 +31,7 @@ slt1.<base64url(claims_json)>.<base64url(ed25519_sig)>
 
 ## 备选方案
 
-- **标准 JWT（JWS）**：生态成熟但引入 header 协商、alg 混淆攻击面、库体量大；
+- **标准 JWT（JWS）**：生态成熟但引入 header 协商、alg 混淆等额外风险面、库体量大；
   我们无跨信任域互操作需求，自描述前缀更简洁可控。放弃。
 - **PASETO**：安全默认好，但仍重于需求，且 v4 的 XChaCha 分支与我们“签名而非加密令牌”
   的诉求不完全对齐（claims 无需保密，只需完整性 + 主体绑定）。放弃。

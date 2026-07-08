@@ -193,7 +193,7 @@ fn chain_hash(prev: &str, raw: &str) -> String {
     hex::encode(h.finalize())
 }
 
-/// 解析并验链。任何断链/篡改返回 Err。
+/// 解析并验链。任何断链/行被修改返回 Err。
 pub fn parse_lines(text: &str) -> Result<Vec<JournalLine>, String> {
     let mut out = Vec::new();
     let mut prev = GENESIS.to_owned();
@@ -221,7 +221,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn file_chain_parses_and_tamper_is_detected() {
+    fn file_chain_parses_and_modification_is_detected() {
         let dir = tempfile::tempdir().expect("tempdir");
         let j = Journal::open(dir.path()).expect("open");
         j.record(
@@ -250,8 +250,8 @@ mod tests {
         assert_eq!(parse_lines(&text).expect("valid chain").len(), 3);
 
         // Altering any journaled field breaks the hash chain.
-        let tampered = text.replacen("proc.spawn", "proc.evilx", 1);
-        assert!(parse_lines(&tampered).is_err(), "tampered chain must fail");
+        let altered = text.replacen("proc.spawn", "proc.other", 1);
+        assert!(parse_lines(&altered).is_err(), "altered chain must fail");
     }
 
     #[test]

@@ -22,8 +22,8 @@ impl BrowserProcess {
         let user_data_dir = tempfile::tempdir()
             .map_err(|e| AbiError::new(ErrorCode::Internal, format!("tempdir: {e}")))?;
 
-        let mut child = Command::new(binary)
-            .arg("--headless=new")
+        let mut cmd = Command::new(binary);
+        cmd.arg("--headless=new")
             .arg("--remote-debugging-port=0")
             .arg(format!(
                 "--user-data-dir={}",
@@ -35,7 +35,14 @@ impl BrowserProcess {
             .arg("--disable-extensions")
             .arg("--disable-sync")
             .arg("--mute-audio")
-            .arg("--window-size=1280,800")
+            .arg("--window-size=1280,800");
+        // CI 容器等环境的附加启动参数（如 --no-sandbox），空白分隔。
+        if let Ok(extra) = std::env::var("SCOOTLENS_CHROMIUM_EXTRA_ARGS") {
+            for a in extra.split_whitespace() {
+                cmd.arg(a);
+            }
+        }
+        let mut child = cmd
             .arg("about:blank")
             .stdin(Stdio::null())
             .stdout(Stdio::null())

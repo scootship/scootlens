@@ -48,15 +48,28 @@ v0 单管理员令牌足够。
 - P2：Dashboard + Approvals + Journal（安全闭环所需的最小 Console）
 - P4：Session 实时画面/接管 + Inspector + Replay + Settings 完整版
 
-## P2 实现状态
+## 实现状态（P2 + P4）
 
 已落地于 `console/`（Svelte 5 runes + Vite + TS strict）：
 
 - **连接**：首屏输入 Gateway 基址 + `slt1` 令牌 → `RpcClient` 经 `GET /ws?token=…` 握手；
-  连接状态实时显示，`evt.event` 通知触发页面刷新
-- **Dashboard**：`sys.info`（引擎/版本/进程配额水位）+ `proc.list`
+  连接后建立**连接级 `evt.subscribe`（全主题）**驱动页面刷新与事件流；
+  支持 `?token=…&connect=1[&base=…]` 快速接入（本地/e2e 便利，令牌本就走 URL 握手）
+- **Dashboard**：`sys.info`（引擎/版本/进程配额水位）+ `proc.list` + Spawn/Kill 生命周期操作
+- **Session**（P4）：`view.screenshot` 轮询 screencast（running 时 ~2fps，帧同时进内核
+  FrameStore 供回放）；**人工接管**（`act.takeover.start/end`，接管期间 Agent 输入挂起、
+  归还后恢复）；输入注入面板（语义快照元素清单 → `act.click/type/press` + `nav.goto`）
+- **Inspector**（P4）：语义快照文本（Agent 视角）、`net.log` 判定表、实时事件流（最近 100 条）
 - **Approvals**：`cap.pending` 收件箱卡片（主体/方法/作用域/理由/时间）→ `cap.approve`（批准 / 批准并记忆 / 拒绝）
-- **Journal**：`obs.journal` 审计表（按 pid 过滤、limit 可调），客户端轻量完整性自证（seq 连续性 + hash 存在性；完整链重放走 P4 `obs.replay.export`）
-- **分层与测试**：全部协议/校验逻辑集中在 `src/lib/`（`rpc` / `api` / `format` / `journal`），
-  Vitest 单测覆盖 ≥80%（CI 门禁 #11）；Svelte 组件仅做展示，UI e2e（Playwright）留待 P4
+- **Journal**：`obs.journal` 审计表（按 pid 过滤、limit 可调），客户端轻量完整性自证（seq 连续性 + hash 存在性）
+- **Replay**（P4）：`obs.replay.export` 导出/离线打开回放包；WebCrypto 逐行重放哈希链
+  （`sha256(prev+raw)` + prev 链接）并显示校验状态；syscall 时间线 + 画面帧按 `ts_ms` 对齐，
+  支持步进/拖动/仅本 pid 过滤与 `.json` 下载
+- **Settings**（P4）：本会话令牌作用域（`cap.list`）、动态授权（`cap.grant/revoke`）、
+  vault 单向写入（写后仅显示 `vault_ref`）、全局网络规则编辑（`net.rules.get/set`）；
+  令牌签发在守护进程侧：`scootlensd --issue <subject>=<scope,…>`
+- **分层与测试**：全部协议/校验逻辑集中在 `src/lib/`（`rpc` / `api` / `format` / `journal` /
+  `session` / `replay` / `connect`），Vitest 单测覆盖 ≥80%（CI 门禁 #11）；Svelte 组件仅做展示；
+  **Playwright UI e2e**（CI 门禁 #12）以 `scootlensd --engine mock` 全栈驱动关键路径：
+  连接/spawn/screencast/接管挂起-恢复/审批闭环/journal 完整性/回放验链/设置动作
 - **分发**：`npm run build` 产出 `console/dist/`，由 `scootlensd --console-dir console/dist` 静态托管于 `/`（`tower-http` ServeDir）

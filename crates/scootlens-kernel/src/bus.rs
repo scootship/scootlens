@@ -57,6 +57,9 @@ pub enum BusPayload {
         method: String,
         scope: String,
     },
+    /// `act.takeover`：人工接管开始/结束（结束含进程终止时的自动清除）。
+    #[serde(rename = "act.takeover")]
+    Takeover { active: bool, holder: String },
     /// `quota.exceeded`：进程内存越过配额水位（处置动作见 `policy`）。
     #[serde(rename = "quota.exceeded")]
     QuotaExceeded {
@@ -96,6 +99,7 @@ impl BusPayload {
             BusPayload::ConsoleLog { .. } => "console",
             BusPayload::NetRequest { .. } => "net.request",
             BusPayload::CapRequest { .. } => "cap.request",
+            BusPayload::Takeover { .. } => "act.takeover",
             BusPayload::QuotaExceeded { .. } => "quota.exceeded",
             BusPayload::WfRun { .. } => "wf.run",
         }

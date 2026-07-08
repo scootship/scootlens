@@ -47,8 +47,8 @@ slt1.<base64url(claims_json)>.<base64url(ed25519_sig)>
 
 ### 敏感作用域（默认人工审批）
 
-`js:exec`、`state:read/write/export/import`、`act:upload`、`net:rules`、`vault:use`（首次）、
-`obs:replay`、`cap:admin`
+`js:exec`、`state:read/write/export/import`、`act:upload`、`act:takeover`、`net:rules`、
+`vault:use`（首次）、`obs:replay`、`cap:admin`
 
 审批流：调用挂起 → Console 弹审批卡（主体/作用域/参数摘要/页面截图）→ 批准（可记忆为规则）/拒绝。
 

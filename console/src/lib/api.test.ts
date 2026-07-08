@@ -69,4 +69,100 @@ describe("ConsoleApi", () => {
     await api.journal();
     expect(calls[0].params).toEqual({ limit: 100 });
   });
+
+  // ---------- P4 ----------
+
+  it("subscribe returns sub_id and forwards pid/topics", async () => {
+    const { api, calls } = stub({ "evt.subscribe": { sub_id: "sub-1" } });
+    expect(await api.subscribe()).toBe("sub-1");
+    expect(calls[0].params).toEqual({ topics: [] });
+    await api.subscribe("p-1", ["nav", "act.takeover"]);
+    expect(calls[1].params).toEqual({ pid: "p-1", topics: ["nav", "act.takeover"] });
+  });
+
+  it("procSpawn / procKill / navGoto delegate", async () => {
+    const { api, calls } = stub({
+      "proc.spawn": { pid: "p-9" },
+      "proc.kill": { ok: true },
+      "nav.goto": { url: "http://a.test/" },
+    });
+    expect(await api.procSpawn()).toBe("p-9");
+    expect(calls[0].params).toEqual({});
+    await api.procSpawn("work");
+    expect(calls[1].params).toEqual({ profile: "work" });
+    await api.procKill("p-9");
+    await api.navGoto("p-9", "http://a.test/");
+    expect(calls[2]).toEqual({ method: "proc.kill", params: { pid: "p-9" } });
+    expect(calls[3].params).toEqual({ pid: "p-9", url: "http://a.test/" });
+  });
+
+  it("screenshot builds a data url; snapshotText unwraps text", async () => {
+    const { api } = stub({
+      "view.screenshot": { format: "png", data_base64: "AA==" },
+      "view.snapshot": { text: '- document "Home"\n' },
+    });
+    expect(await api.screenshot("p-1")).toBe("data:image/png;base64,AA==");
+    expect(await api.snapshotText("p-1")).toContain("document");
+  });
+
+  it("act helpers forward pid/ref payloads", async () => {
+    const { api, calls } = stub({ "act.click": {}, "act.type": {}, "act.press": {} });
+    await api.actClick("p-1", "s1e2");
+    await api.actType("p-1", "s1e2", "hi");
+    await api.actPress("p-1", "Enter");
+    expect(calls.map((c) => c.method)).toEqual(["act.click", "act.type", "act.press"]);
+    expect(calls[1].params).toEqual({ pid: "p-1", ref: "s1e2", text: "hi" });
+    expect(calls[2].params).toEqual({ pid: "p-1", keys: "Enter" });
+  });
+
+  it("takeover start/end delegate to act.takeover.*", async () => {
+    const { api, calls } = stub({
+      "act.takeover.start": { ok: true, holder: "user:admin" },
+      "act.takeover.end": { ok: true },
+    });
+    await api.takeoverStart("p-1");
+    await api.takeoverEnd("p-1");
+    expect(calls.map((c) => c.method)).toEqual(["act.takeover.start", "act.takeover.end"]);
+    expect(calls[0].params).toEqual({ pid: "p-1" });
+  });
+
+  it("netLog extracts entries; replayExport unwraps bundle", async () => {
+    const { api, calls } = stub({
+      "net.log": { entries: [{ url: "http://a.test/", allowed: true }] },
+      "obs.replay.export": { bundle: { format_version: 1, pid: "p-1", journal: [] } },
+    });
+    const log = await api.netLog("p-1", 10);
+    expect(log).toHaveLength(1);
+    expect(calls[0].params).toEqual({ pid: "p-1", limit: 10 });
+    const bundle = await api.replayExport("p-1", 64);
+    expect(bundle.pid).toBe("p-1");
+    expect(calls[1].params).toEqual({ pid: "p-1", journal_limit: 64 });
+  });
+
+  it("cap/vault/net settings calls carry exact params", async () => {
+    const { api, calls } = stub({
+      "cap.list": { subject: "user:admin", scopes: ["*"] },
+      "cap.grant": {},
+      "cap.revoke": {},
+      "state.write": { ok: true },
+      "net.rules.get": { rules: { default: "allow", rules: [] } },
+      "net.rules.set": { ok: true },
+    });
+    expect((await api.capList()).subject).toBe("user:admin");
+    await api.capGrant("agent:a", "nav@a.test");
+    await api.capRevoke("agent:a", "nav@a.test");
+    await api.vaultWrite("gh-password", "s3cret");
+    await api.netRulesGet();
+    await api.netRulesSet({ default: "deny", rules: [] });
+    expect(calls[1].params).toEqual({ subject: "agent:a", scope: "nav@a.test" });
+    expect(calls[3].params).toEqual({
+      namespace: "vault",
+      key: "gh-password",
+      value: "s3cret",
+    });
+    expect(calls[4].params).toEqual({});
+    expect(calls[5].params).toEqual({ default: "deny", rules: [] });
+    await api.netRulesGet("p-2");
+    expect(calls[6].params).toEqual({ pid: "p-2" });
+  });
 });

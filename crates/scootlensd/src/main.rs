@@ -44,6 +44,12 @@ struct Args {
     /// 最大并发引擎进程数。
     #[arg(long, default_value_t = 8)]
     max_procs: usize,
+
+    /// 额外签发受限令牌（可重复）。格式：`<subject>=<scope>[,<scope>…]`，
+    /// 如 `agent:demo=nav@fixture.test,view@fixture.test,act@fixture.test`。
+    /// 审批策略取默认（敏感作用域 = 人工审批）；令牌仅打印一次，不落盘。
+    #[arg(long = "issue", value_name = "SUBJECT=SCOPES")]
+    issue: Vec<String>,
 }
 
 fn main() -> Result<(), String> {
@@ -87,6 +93,12 @@ async fn run(args: Args) -> Result<(), String> {
     let token = kernel.security().issue(&admin);
     println!("admin token: {token}");
 
+    // 受限令牌：默认审批策略（敏感作用域挂起人工审批），供 Agent/演示接入
+    for spec in &args.issue {
+        let (subject, token) = issue_scoped(&kernel, spec)?;
+        println!("token[{subject}]: {token}");
+    }
+
     let gateway = Gateway::new(
         Dispatcher::new(kernel),
         GatewayConfig {
@@ -102,4 +114,33 @@ async fn run(args: Args) -> Result<(), String> {
     println!("listening on ws://{addr}/ws");
 
     gateway.serve(listener).await.map_err(|e| e.to_string())
+}
+
+/// 解析 `--issue <subject>=<scope,scope…>` 并签发令牌。
+fn issue_scoped(kernel: &scootlens_kernel::Kernel, spec: &str) -> Result<(String, String), String> {
+    let (subject, scopes_text) = spec
+        .split_once('=')
+        .ok_or_else(|| format!("--issue {spec:?}: expected <subject>=<scope,scope…>"))?;
+    if subject.is_empty() {
+        return Err(format!("--issue {spec:?}: empty subject"));
+    }
+    let scopes = scopes_text
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse().map_err(|e| format!("--issue {spec:?}: {e}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    if scopes.is_empty() {
+        return Err(format!("--issue {spec:?}: at least one scope required"));
+    }
+    let claims = TokenClaims {
+        subject: subject.to_owned(),
+        scopes,
+        constraints: TokenConstraints::default(),
+        issued_by: "scootlensd".into(),
+        issued_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default(),
+    };
+    Ok((subject.to_owned(), kernel.security().issue(&claims)))
 }

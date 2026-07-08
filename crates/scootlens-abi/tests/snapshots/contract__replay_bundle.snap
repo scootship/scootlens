@@ -1,0 +1,25 @@
+---
+source: crates/scootlens-abi/tests/contract.rs
+expression: bundle
+---
+{
+  "format_version": 1,
+  "pid": "p-a1",
+  "engine": "mock",
+  "exported_at_ms": 1700000000000,
+  "journal": [
+    {
+      "seq": 1,
+      "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+      "hash": "abababababababababababababababababababababababababababababababab",
+      "raw": "{\"seq\":1}"
+    }
+  ],
+  "frames": [
+    {
+      "ts_ms": 1700000000500,
+      "format": "png",
+      "data_base64": "iVBO"
+    }
+  ]
+}

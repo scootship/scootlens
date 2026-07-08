@@ -23,6 +23,8 @@ expression: "method::ALL"
   "act.scroll",
   "act.select",
   "act.upload",
+  "act.takeover.start",
+  "act.takeover.end",
   "dom.extract",
   "js.exec",
   "evt.wait",

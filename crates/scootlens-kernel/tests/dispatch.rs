@@ -123,12 +123,13 @@ async fn unknown_method_returns_method_not_found() {
 }
 
 #[tokio::test]
-async fn known_but_unimplemented_returns_unsupported() {
+async fn method_table_is_fully_implemented() {
+    // P4 起方法表全部落地：obs.replay.export 不再返回 E_UNSUPPORTED
+    // （参数缺失走 serde 强校验 → E_INVALID_ARG）。
     let d = dispatcher();
-    // obs.replay.export 属后续阶段
     let resp = call(&d, "obs.replay.export", json!({})).await;
     let (_, code) = error_code(&resp);
-    assert_eq!(code, "E_UNSUPPORTED");
+    assert_eq!(code, "E_INVALID_ARG");
 }
 
 #[tokio::test]
@@ -203,8 +204,9 @@ async fn screenshot_returns_base64() {
     let resp = call(&d, "view.screenshot", json!({"pid": pid})).await;
     let shot = result(&resp);
     assert_eq!(shot["format"], "png");
-    // mock 返回 PNG 魔数前 4 字节
-    assert_eq!(shot["data_base64"], "iVBORw==");
+    // mock 返回合法 1x1 PNG；断言 PNG 签名前缀（base64 of \x89PNG…）
+    let b64 = shot["data_base64"].as_str().expect("base64");
+    assert!(b64.starts_with("iVBORw"), "png signature expected: {b64}");
 }
 
 // ---------- evt.wait ----------

@@ -94,6 +94,7 @@ pub const SENSITIVE_SCOPES: &[&str] = &[
     "state:export",
     "state:import",
     "act:upload",
+    "act:takeover",
     "net:rules",
     "vault:use",
     "obs:replay",

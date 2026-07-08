@@ -55,7 +55,7 @@ cargo run -p scootctl -- click <pid> <ref>        # 按 ref 点击元素
 cargo run -p scootctl -- ps                       # 列出全部进程
 ```
 
-常用守护进程参数：`--listen 127.0.0.1:9910`（默认）、`--state-dir <dir>`（持久化密钥/journal/vault，缺省为纯内存模式）、`--max-procs 8`、`--console-dir <dir>`（托管 Web Console 静态文件）。
+常用守护进程参数：`--listen 127.0.0.1:9910`（默认）、`--state-dir <dir>`（持久化密钥/journal/vault，缺省为纯内存模式）、`--max-procs 8`、`--console-dir <dir>`（托管 Web Console 静态文件）、`--issue <subject>=<scope,…>`（额外签发受限令牌，可重复；敏感作用域默认人工审批）。
 
 ### Web Console
 
@@ -64,7 +64,34 @@ cd console
 npm install
 npm run dev        # 开发模式
 npm run build      # 产物在 console/dist，可交给 scootlensd --console-dir 托管
+npm run e2e        # Playwright UI e2e（需先 cargo build -p scootlensd 与 npm run build）
 ```
+
+Console 完整版包含 Dashboard / **Session（screencast + 人工接管 + 输入注入）** /
+**Inspector** / Approvals / Journal / **Replay（回放包离线验链播放）** / **Settings**。
+浏览器打开 `http://127.0.0.1:9910/?token=<admin token>&connect=1` 即可直连。
+
+### MCP 接入（Agent 生态）
+
+`scootlens-mcp` 是 ABI 的 MCP 投影（stdio），工具清单由系统调用表自动生成
+（`scootlens_<domain>_<verb>`）。在任意 MCP 客户端里配置：
+
+```jsonc
+{
+  "mcpServers": {
+    "scootlens": {
+      "command": "scootlens-mcp",
+      "env": {
+        "SCOOTLENS_URL": "ws://127.0.0.1:9910/ws",
+        "SCOOTLENS_TOKEN": "<scootlensd --issue 签发的受限令牌>"
+      }
+    }
+  }
+}
+```
+
+MCP 层零权限判断：作用域、限速、人工审批全部由内核强制（敏感调用会挂起等待
+Console Approvals 里的人工批准）。
 
 ## 仓库导览
 
@@ -81,7 +108,7 @@ crates/
 ├── scootlensd          # 内核守护进程（二进制）
 ├── scootctl            # 命令行客户端（二进制）
 └── scootlens-test-support     # 测试支撑
-console/                # Svelte Web Console（Dashboard / Approvals / Journal）
+console/                # Svelte Web Console（Dashboard / Session / Inspector / Approvals / Journal / Replay / Settings）
 docs/                   # 设计文档（从 docs/README.md 开始读）
 fixtures/               # e2e 测试站点
 ```

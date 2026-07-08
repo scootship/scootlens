@@ -28,4 +28,8 @@ target
 node_modules/
 dist/
 
+# Playwright（console/e2e）
+test-results/
+playwright-report/
+
 .DS_Store

@@ -11,6 +11,7 @@ mod id;
 pub mod method;
 mod net;
 mod quota;
+mod replay;
 mod rpc;
 mod scope;
 mod wf;
@@ -25,9 +26,10 @@ pub use net::{
     NetAction, NetDecision, NetDefault, NetHeader, NetRequestSummary, NetRule, NetRuleSet,
 };
 pub use quota::{QuotaPolicy, QuotaSpec};
+pub use replay::{REPLAY_FORMAT_VERSION, ReplayBundle, ReplayFrame, ReplayLine};
 pub use rpc::{RpcId, RpcNotification, RpcOutcome, RpcRequest, RpcResponse, V2};
 pub use scope::{ParseScopeError, Scope, origin_matches};
 pub use wf::{WfRetry, WfSpec, WfStep, WfTrigger};
 
 /// ABI 版本。v0 期间允许破坏性变更（需 ADR）；v1 起向后兼容。
-pub const ABI_VERSION: &str = "0.1.0";
+pub const ABI_VERSION: &str = "0.2.0";

@@ -36,6 +36,8 @@ methods! {
     ACT_SCROLL = "act.scroll";
     ACT_SELECT = "act.select";
     ACT_UPLOAD = "act.upload";
+    ACT_TAKEOVER_START = "act.takeover.start";
+    ACT_TAKEOVER_END = "act.takeover.end";
     // dom / js
     DOM_EXTRACT = "dom.extract";
     JS_EXEC = "js.exec";

@@ -181,6 +181,16 @@ impl Journal {
             .collect()
     }
 
+    /// 尾部链段（旧→新序最近 `limit` 行；`obs.replay.export` 数据源）。
+    ///
+    /// 段内可离线自证：首行之后每行 `prev == 前行 hash` 且
+    /// `hash == sha256(prev + raw)`。
+    pub fn lines_tail(&self, limit: usize) -> Vec<JournalLine> {
+        let inner = self.lock();
+        let n = inner.lines.len();
+        inner.lines[n.saturating_sub(limit)..].to_vec()
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }

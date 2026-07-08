@@ -322,3 +322,93 @@ label.check {
   gap: 6px;
   color: var(--muted);
 }
+
+/* ---------- P4：Session / Inspector / Replay / Settings ---------- */
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(360px, 1fr) minmax(360px, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+@media (max-width: 980px) {
+  .split {
+    grid-template-columns: 1fr;
+  }
+}
+
+.viewport img {
+  width: 100%;
+  max-height: 420px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: block;
+  margin-bottom: 12px;
+}
+
+.snapshot {
+  margin: 0;
+  padding: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  max-height: 480px;
+  overflow: auto;
+  white-space: pre;
+  font-size: 12px;
+}
+
+.notice {
+  background: rgba(71, 209, 138, 0.12);
+  border: 1px solid rgba(71, 209, 138, 0.4);
+  color: var(--ok);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+}
+
+.row-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.row-actions button,
+button.danger {
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--fg);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+
+button.danger {
+  color: var(--danger);
+  border-color: rgba(255, 107, 107, 0.4);
+}
+
+tr.active td {
+  background: rgba(91, 157, 255, 0.12);
+}
+
+textarea {
+  width: 100%;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--fg);
+  border-radius: 8px;
+  padding: 10px;
+  font: inherit;
+  font-size: 12px;
+  resize: vertical;
+}
+
+input[type="range"] {
+  accent-color: var(--accent);
+}

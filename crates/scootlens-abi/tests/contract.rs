@@ -4,9 +4,9 @@
 
 use scootlens_abi::{
     ABI_VERSION, AbiError, ApprovalMode, ElementRef, ErrorCode, NetAction, NetDecision, NetRule,
-    NetRuleSet, Pid, QuotaPolicy, QuotaSpec, RpcId, RpcNotification, RpcRequest, RpcResponse,
-    Scope, SnapId, TokenClaims, TokenConstraints, WfRetry, WfSpec, WfStep, WfTrigger, is_sensitive,
-    method, origin_matches,
+    NetRuleSet, Pid, QuotaPolicy, QuotaSpec, REPLAY_FORMAT_VERSION, ReplayBundle, ReplayFrame,
+    ReplayLine, RpcId, RpcNotification, RpcRequest, RpcResponse, Scope, SnapId, TokenClaims,
+    TokenConstraints, WfRetry, WfSpec, WfStep, WfTrigger, is_sensitive, method, origin_matches,
 };
 use serde_json::json;
 
@@ -211,6 +211,45 @@ fn abi_version_is_semver_like() {
     assert_eq!(ABI_VERSION.split('.').count(), 3);
 }
 
+// ---------- 回放包（P4）----------
+
+#[test]
+fn replay_bundle_wire_format() {
+    let bundle = ReplayBundle {
+        format_version: REPLAY_FORMAT_VERSION,
+        pid: "p-a1".parse().expect("pid"),
+        engine: "mock".into(),
+        exported_at_ms: 1_700_000_000_000,
+        journal: vec![ReplayLine {
+            seq: 1,
+            prev: "0".repeat(64),
+            hash: "ab".repeat(32),
+            raw: "{\"seq\":1}".into(),
+        }],
+        frames: vec![ReplayFrame {
+            ts_ms: 1_700_000_000_500,
+            format: "png".into(),
+            data_base64: "iVBO".into(),
+        }],
+    };
+    insta::assert_json_snapshot!("replay_bundle", bundle);
+
+    let wire = serde_json::to_value(&bundle).expect("ser");
+    let back: ReplayBundle = serde_json::from_value(wire).expect("de");
+    assert_eq!(back, bundle);
+
+    // frames 可缺省（仅链段导出）
+    let lean: ReplayBundle = serde_json::from_value(json!({
+        "format_version": 1,
+        "pid": "p-a1",
+        "engine": "mock",
+        "exported_at_ms": 0,
+        "journal": [],
+    }))
+    .expect("de");
+    assert!(lean.frames.is_empty());
+}
+
 // ---------- 作用域（P2）----------
 
 #[test]
@@ -309,11 +348,19 @@ fn sensitive_scope_set() {
         "state:read:cookies@a.b",
         "cap:admin",
         "vault:use",
+        "act:takeover",
+        "obs:replay",
     ] {
         let scope: Scope = s.parse().expect(s);
         assert!(is_sensitive(&scope), "{s} should be sensitive");
     }
-    for s in ["nav@a.test", "view@a.test", "proc:spawn", "state:list:proc"] {
+    for s in [
+        "nav@a.test",
+        "view@a.test",
+        "proc:spawn",
+        "state:list:proc",
+        "act@a.test",
+    ] {
         let scope: Scope = s.parse().expect(s);
         assert!(!is_sensitive(&scope), "{s} should not be sensitive");
     }

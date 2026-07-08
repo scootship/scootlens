@@ -59,7 +59,7 @@ jobs:
           SCOOTLENS_CHROMIUM_EXTRA_ARGS: "--no-sandbox --disable-dev-shm-usage --disable-gpu"
         run: >
           cargo llvm-cov --workspace --fail-under-lines 80
-          --ignore-filename-regex '(scootctl|scootlensd)/src/main\.rs'
+          --ignore-filename-regex '(scootctl|scootlensd|scootlens-mcp)/src/main\.rs'
           -- --include-ignored --test-threads=1
 
   # 门禁 5：依赖审计（advisories / licenses / bans / sources）
@@ -163,3 +163,41 @@ jobs:
         run: npm run coverage
       - name: type-check + build
         run: npm run build
+
+  # 门禁 12：Console UI e2e（Playwright，P4）——全栈：scootlensd(mock) 托管 dist
+  console-e2e:
+    name: console e2e (playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+      - name: build scootlensd (mock engine)
+        run: cargo build -p scootlensd
+      - name: npm ci + build console
+        working-directory: console
+        run: |
+          npm ci
+          npm run build
+      - name: install playwright chromium
+        working-directory: console
+        run: npx playwright install --with-deps chromium
+      - name: playwright e2e
+        working-directory: console
+        run: npm run e2e
+
+  # 门禁 13：MCP 投影 e2e（stdio MCP 客户端全流程，含人工审批）
+  mcp-e2e:
+    name: mcp e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: mcp projection + stdio e2e
+        run: cargo test -p scootlens-mcp

@@ -33,6 +33,25 @@ export interface PendingApproval {
 
 export type ApprovalDecision = "allow" | "deny";
 
+/** 回放包（obs.replay.export → bundle 字段；docs/03-abi-spec.md）。 */
+export interface ReplayBundleWire {
+  format_version: number;
+  pid: string;
+  engine: string;
+  exported_at_ms: number;
+  journal: unknown[];
+  frames?: unknown[];
+}
+
+/** 网络请求日志条目（net.log）。 */
+export interface NetLogEntry {
+  url?: string;
+  method?: string;
+  allowed?: boolean;
+  ts_ms?: number;
+  [k: string]: unknown;
+}
+
 /** 只读取数组字段，容错非数组。 */
 function asArray(v: unknown, key: string): unknown[] {
   if (v && typeof v === "object" && Array.isArray((v as Record<string, unknown>)[key])) {
@@ -71,5 +90,108 @@ export class ConsoleApi {
     if (pid) params.pid = pid;
     const r = await this.client.call("obs.journal", params);
     return parseEntries((r as { entries?: unknown } | null)?.entries);
+  }
+
+  // ---------- P4：Session / Inspector / Replay / Settings ----------
+
+  /** 连接级事件订阅（gateway 会话语义）；返回 sub_id。 */
+  async subscribe(pid?: string, topics: string[] = []): Promise<string> {
+    const params: Record<string, unknown> = { topics };
+    if (pid) params.pid = pid;
+    const r = await this.client.call<{ sub_id: string }>("evt.subscribe", params);
+    return r.sub_id;
+  }
+
+  async procSpawn(profile?: string): Promise<string> {
+    const params: Record<string, unknown> = {};
+    if (profile) params.profile = profile;
+    const r = await this.client.call<{ pid: string }>("proc.spawn", params);
+    return r.pid;
+  }
+
+  procKill(pid: string): Promise<unknown> {
+    return this.client.call("proc.kill", { pid });
+  }
+
+  navGoto(pid: string, url: string): Promise<unknown> {
+    return this.client.call("nav.goto", { pid, url });
+  }
+
+  /** 截图 → data URL（screencast 帧）。 */
+  async screenshot(pid: string): Promise<string> {
+    const r = await this.client.call<{ format: string; data_base64: string }>(
+      "view.screenshot",
+      { pid },
+    );
+    return `data:image/${r.format};base64,${r.data_base64}`;
+  }
+
+  /** 语义快照紧凑文本。 */
+  async snapshotText(pid: string): Promise<string> {
+    const r = await this.client.call<{ text: string }>("view.snapshot", { pid });
+    return r.text ?? "";
+  }
+
+  actClick(pid: string, ref: string): Promise<unknown> {
+    return this.client.call("act.click", { pid, ref });
+  }
+
+  actType(pid: string, ref: string, text: string): Promise<unknown> {
+    return this.client.call("act.type", { pid, ref, text });
+  }
+
+  actPress(pid: string, keys: string): Promise<unknown> {
+    return this.client.call("act.press", { pid, keys });
+  }
+
+  takeoverStart(pid: string): Promise<unknown> {
+    return this.client.call("act.takeover.start", { pid });
+  }
+
+  takeoverEnd(pid: string): Promise<unknown> {
+    return this.client.call("act.takeover.end", { pid });
+  }
+
+  async netLog(pid: string, limit = 50): Promise<NetLogEntry[]> {
+    const r = await this.client.call("net.log", { pid, limit });
+    return asArray(r, "entries") as NetLogEntry[];
+  }
+
+  async replayExport(pid: string, journalLimit = 1000): Promise<ReplayBundleWire> {
+    const r = await this.client.call<{ bundle: ReplayBundleWire }>("obs.replay.export", {
+      pid,
+      journal_limit: journalLimit,
+    });
+    return r.bundle;
+  }
+
+  capList(): Promise<{ subject: string; scopes: string[] }> {
+    return this.client.call("cap.list");
+  }
+
+  capGrant(subject: string, scope: string): Promise<unknown> {
+    return this.client.call("cap.grant", { subject, scope });
+  }
+
+  capRevoke(subject: string, scope: string): Promise<unknown> {
+    return this.client.call("cap.revoke", { subject, scope });
+  }
+
+  /** vault 单向写入（只写不读）；返回后仅显示 vault_ref 句柄。 */
+  vaultWrite(name: string, secret: string): Promise<unknown> {
+    return this.client.call("state.write", { namespace: "vault", key: name, value: secret });
+  }
+
+  netRulesGet(pid?: string): Promise<unknown> {
+    const params: Record<string, unknown> = {};
+    if (pid) params.pid = pid;
+    return this.client.call("net.rules.get", params);
+  }
+
+  netRulesSet(rules: unknown, pid?: string): Promise<unknown> {
+    const params: Record<string, unknown> =
+      rules && typeof rules === "object" ? { ...(rules as Record<string, unknown>) } : {};
+    if (pid) params.pid = pid;
+    return this.client.call("net.rules.set", params);
   }
 }

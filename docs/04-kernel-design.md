@@ -25,6 +25,7 @@ stateDiagram-v2
 - **proc.snapshot/restore（P3 已落地）**：`export_state`（cookie/storage）+ 当前 URL + profile → 序列化为 `SnapshotDoc`，内容寻址存储（`state_dir/snapshots/<sha256 前 16hex>.json`，同状态幂等同 id）；`restore` = spawn（同 profile）→ 导航原 URL → 导入状态（先导航后导入，storage 依赖 origin 就位）；快照记录引擎 id，恢复时不匹配拒绝（跨引擎恢复留待能力矩阵允许时放开）
 - **隔离**：一 proc 一引擎进程一 profile 目录；目录权限 0700；proc 间无共享
 - **profile 复用（P3 已落地）**：`state.import` 把状态包合并写入 `state_dir/profiles/<name>.json`；以该 profile spawn 时（引擎具备 `state` 能力）自动预加载
+- **人工接管（P4 已落地，ADR-0009）**：per-pid 接管表（holder + `Notify`）；`act.takeover.start/end`（🔒 `act:takeover`，仅 Running）。接管期间非 holder 的 `act.*` 在 dispatch 层输入门**挂起等待**（先登记唤醒兴趣再复查，无竞态漏唤醒），归还/进程终止时唤醒，超 `takeover_hold_timeout`（默认 30s）返回 `E_TIMEOUT`；start/end/终止清除均广播 `act.takeover` 事件（关键不丢主题）
 
 ## 4.2 Scheduler
 
@@ -52,7 +53,7 @@ stateDiagram-v2
 ## 4.4 Event Bus
 
 - 自研总线（P3 起替换 tokio broadcast）：每订阅者独立 `VecDeque` + `Notify`，发布同步、消费异步
-- **背压策略（已落地）**：高频主题（`nav`、`console`、`net.request`）队满时丢弃**同类**最旧事件并累计计数，`dropped` 随该订阅者的下一条事件带出；关键主题（`proc.lifecycle`、`cap.request`、`quota.exceeded`、`wf.run`）无界、永不丢弃，且不会被高频洪峰挤掉
+- **背压策略（已落地）**：高频主题（`nav`、`console`、`net.request`）队满时丢弃**同类**最旧事件并累计计数，`dropped` 随该订阅者的下一条事件带出；关键主题（`proc.lifecycle`、`cap.request`、`quota.exceeded`、`wf.run`、`act.takeover`）无界、永不丢弃，且不会被高频洪峰挤掉
 - 所有事件带单调 `seq` 与 `pid`，供回放对齐
 
 ## 4.5 Security Manager
@@ -82,10 +83,11 @@ stateDiagram-v2
 | 机制 | 内容 | 存储 |
 |---|---|---|
 | journal | 每次 syscall：主体、作用域、参数摘要、结果、耗时（append-only） | **P2 为 JSONL 哈希链**（`<state-dir>/journal.jsonl`，每行 `{seq,prev,hash,raw}`，`hash=sha256(prev+raw)`）；SQLite WAL 为 P3 |
-| trace | tracing span：gateway→security→kernel→driver 全链路 | OTLP 导出可选 |
-| replay（P4） | syscall 序列 + screencast 帧 + 事件流，按 `seq` 对齐 | 回放包（zip） |
+| trace | tracing span：gateway→security→kernel→driver 全链路 | OTLP 导出可选（P4 未启用，backlog） |
+| replay（P4 已落地） | journal 哈希链**连续尾段**（未过滤，可离线重放验证）+ 画面帧（`ts_ms` 对齐） | `ReplayBundle` JSON（`obs.replay.export` 返回；Console 可下载 `.json` 离线播放） |
 
 - journal 三类记录点：`Call`（入口，参数已脱敏）、`Result`（成功，返回已消毒）、`Deny`（拒绝，含错误码）；哈希链可离线校验，任一行被修改则重放验链失败
+- **FrameStore（P4）**：`view.screenshot` 成功即采集一帧（Console screencast 轮询 = 持续产帧）；per-pid 环形 60 帧、全局 32 proc（淘汰最久未更新者）；proc 终止后帧保留供事后回放
 
 - 敏感值（vault、cookie 值）一律脱敏后入 journal
 - `sys.info` 暴露配额水位与引擎健康，Console 仪表盘直接消费

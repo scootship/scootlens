@@ -303,6 +303,7 @@ impl Dispatcher {
                 let p: RefParams = parse(params)?;
                 let pid = parse_pid(&p.pid)?;
                 self.authz(caller, self.scope_at(&["act"], &pid), m).await?;
+                k.takeover_gate(&pid, &caller.subject).await?;
                 let action = InputAction::Click {
                     target: parse_ref(&p.r#ref)?,
                 };
@@ -312,6 +313,7 @@ impl Dispatcher {
                 let p: TypeParams = parse(params)?;
                 let pid = parse_pid(&p.pid)?;
                 self.authz(caller, self.scope_at(&["act"], &pid), m).await?;
+                k.takeover_gate(&pid, &caller.subject).await?;
                 let text = match (&p.vault_ref, &p.text) {
                     (Some(name), text) => {
                         if text.as_deref().is_some_and(|t| !t.is_empty()) {
@@ -346,6 +348,7 @@ impl Dispatcher {
                 let p: PressParams = parse(params)?;
                 let pid = parse_pid(&p.pid)?;
                 self.authz(caller, self.scope_at(&["act"], &pid), m).await?;
+                k.takeover_gate(&pid, &caller.subject).await?;
                 let action = InputAction::Press { keys: p.keys };
                 Ok(to_value(k.dispatch(&pid, &action).await?))
             }
@@ -353,6 +356,7 @@ impl Dispatcher {
                 let p: ScrollParams = parse(params)?;
                 let pid = parse_pid(&p.pid)?;
                 self.authz(caller, self.scope_at(&["act"], &pid), m).await?;
+                k.takeover_gate(&pid, &caller.subject).await?;
                 let target = match &p.r#ref {
                     Some(r) => Some(parse_ref(r)?),
                     None => None,
@@ -368,6 +372,7 @@ impl Dispatcher {
                 let p: SelectParams = parse(params)?;
                 let pid = parse_pid(&p.pid)?;
                 self.authz(caller, self.scope_at(&["act"], &pid), m).await?;
+                k.takeover_gate(&pid, &caller.subject).await?;
                 let action = InputAction::Select {
                     target: parse_ref(&p.r#ref)?,
                     values: p.values,
@@ -379,12 +384,30 @@ impl Dispatcher {
                 let pid = parse_pid(&p.pid)?;
                 self.authz(caller, self.scope_at(&["act", "upload"], &pid), m)
                     .await?;
+                k.takeover_gate(&pid, &caller.subject).await?;
                 let resolved = k.vfs().resolve_upload(&p.path)?;
                 let action = InputAction::Upload {
                     target: parse_ref(&p.r#ref)?,
                     paths: vec![resolved],
                 };
                 Ok(to_value(k.dispatch(&pid, &action).await?))
+            }
+            // ---------- takeover（P4：人工接管，docs/07-web-console.md） ----------
+            method::ACT_TAKEOVER_START => {
+                let p: PidParams = parse(params)?;
+                let pid = parse_pid(&p.pid)?;
+                self.authz(caller, Scope::required(&["act", "takeover"], None), m)
+                    .await?;
+                k.takeover_start(&pid, &caller.subject)?;
+                Ok(json!({ "ok": true, "holder": caller.subject }))
+            }
+            method::ACT_TAKEOVER_END => {
+                let p: PidParams = parse(params)?;
+                let pid = parse_pid(&p.pid)?;
+                self.authz(caller, Scope::required(&["act", "takeover"], None), m)
+                    .await?;
+                k.takeover_end(&pid, &caller.subject)?;
+                Ok(json!({ "ok": true }))
             }
             // ---------- js ----------
             method::JS_EXEC => {
@@ -575,6 +598,14 @@ impl Dispatcher {
                     .await?;
                 let entries = k.journal().tail(200, Some(&p.pid));
                 Ok(json!({ "pid": p.pid, "entries": entries }))
+            }
+            method::OBS_REPLAY_EXPORT => {
+                let p: ReplayParams = parse(params)?;
+                self.authz(caller, Scope::required(&["obs", "replay"], None), m)
+                    .await?;
+                let bundle =
+                    k.replay_export(&parse_pid(&p.pid)?, p.journal_limit.unwrap_or(1000))?;
+                Ok(json!({ "bundle": bundle }))
             }
             // ---------- wf ----------
             method::WF_CREATE => {
@@ -767,13 +798,11 @@ impl Dispatcher {
     }
 }
 
-/// 未落地方法的规划作用域（先鉴权再 `E_UNSUPPORTED`）。
+/// 未落地方法的规划作用域（先鉴权再 `E_UNSUPPORTED`）。P4 起方法表全部落地，
+/// 本表留空备后续阶段新方法使用。
 fn fallback_scope(m: &str) -> Option<Scope> {
-    let segs: &[&str] = match m {
-        method::OBS_REPLAY_EXPORT => &["obs", "replay"],
-        _ => return None,
-    };
-    Some(Scope::required(segs, None))
+    let _ = m;
+    None
 }
 
 fn ns_prefix(ns: &str) -> &'static str {
@@ -996,6 +1025,14 @@ struct ObsParams {
     pid: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct ReplayParams {
+    pid: String,
+    /// journal 链段行数上限（默认 1000，内核夹取 1..=4096）。
+    #[serde(default)]
+    journal_limit: Option<usize>,
 }
 
 /// evt.wait 条件（P1 最小集）。

@@ -11,11 +11,13 @@
 
 mod bus;
 mod dispatch;
+mod frames;
 mod journal;
 mod netstack;
 mod proc;
 mod redact;
 mod security;
+mod takeover;
 mod vfs;
 mod wf;
 
@@ -36,7 +38,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use scootlens_abi::{AbiError, ErrorCode, Pid, QuotaPolicy, QuotaSpec, SnapId};
+use scootlens_abi::{
+    AbiError, ErrorCode, Pid, QuotaPolicy, QuotaSpec, REPLAY_FORMAT_VERSION, ReplayBundle,
+    ReplayLine, SnapId,
+};
 use scootlens_hal::{
     A11ySnapshot, ActResult, EngineCaps, EngineDriver, EngineEvent, EngineHandle, EngineMetrics,
     HalResult, HistoryDir, InputAction, NavResult, ProfileSpec, SnapshotOpts, StateBundle,
@@ -62,6 +67,8 @@ pub struct KernelConfig {
     pub quota_poll_interval: Duration,
     /// 高配额门槛：`proc.spawn` 申请的内存配额超过此值需 `quota:high` 作用域。
     pub quota_high_bytes: u64,
+    /// 人工接管期间，其他主体输入调用的挂起等待上限；超时返回 `E_TIMEOUT`。
+    pub takeover_hold_timeout: Duration,
 }
 
 impl Default for KernelConfig {
@@ -73,6 +80,7 @@ impl Default for KernelConfig {
             approval_timeout: Duration::from_secs(60),
             quota_poll_interval: Duration::from_millis(500),
             quota_high_bytes: 2 * 1024 * 1024 * 1024,
+            takeover_hold_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -115,6 +123,8 @@ struct Inner {
     vfs: StateVfs,
     netstack: Arc<NetStack>,
     redactor: Redactor,
+    takeover: takeover::TakeoverTable,
+    frames: frames::FrameStore,
 }
 
 impl Inner {
@@ -194,6 +204,8 @@ impl Kernel {
                 vfs,
                 netstack: Arc::new(NetStack::default()),
                 redactor: Redactor::default(),
+                takeover: takeover::TakeoverTable::default(),
+                frames: frames::FrameStore::default(),
             }),
         })
     }
@@ -473,6 +485,16 @@ impl Kernel {
         }
         drop(permit);
         self.inner.netstack.drop_proc(pid);
+        // 接管随进程一起清除：唤醒被挂起的输入调用（随后按进程状态失败）
+        if let Some(holder) = self.inner.takeover.clear(pid) {
+            self.inner.emit(
+                Some(pid.clone()),
+                BusPayload::Takeover {
+                    active: false,
+                    holder,
+                },
+            );
+        }
         self.inner.emit(
             Some(pid.clone()),
             BusPayload::ProcLifecycle {
@@ -481,6 +503,91 @@ impl Kernel {
         );
         tracing::info!(%pid, "proc terminated");
         Ok(())
+    }
+
+    // ---------- 人工接管（P4，docs/07-web-console.md） ----------
+
+    /// 开始接管：`subject` 独占该 proc 的输入。仅 Running 可接管。
+    pub fn takeover_start(&self, pid: &Pid, subject: &str) -> HalResult<()> {
+        {
+            let procs = self.inner.lock_procs();
+            let e = procs.get(pid).ok_or_else(|| not_found(pid))?;
+            if e.state != ProcState::Running {
+                return Err(AbiError::new(
+                    ErrorCode::InvalidArg,
+                    format!("cannot take over proc in state {:?}", e.state),
+                ));
+            }
+        }
+        if self.inner.takeover.start(pid, subject)? {
+            self.inner.emit(
+                Some(pid.clone()),
+                BusPayload::Takeover {
+                    active: true,
+                    holder: subject.to_owned(),
+                },
+            );
+            tracing::info!(%pid, %subject, "takeover started");
+        }
+        Ok(())
+    }
+
+    /// 归还控制：仅 holder 本人；唤醒挂起中的输入调用。
+    pub fn takeover_end(&self, pid: &Pid, subject: &str) -> HalResult<()> {
+        self.inner.takeover.end(pid, subject)?;
+        self.inner.emit(
+            Some(pid.clone()),
+            BusPayload::Takeover {
+                active: false,
+                holder: subject.to_owned(),
+            },
+        );
+        tracing::info!(%pid, %subject, "takeover ended");
+        Ok(())
+    }
+
+    /// 当前接管 holder（无接管 = None）。
+    pub fn takeover_holder(&self, pid: &Pid) -> Option<String> {
+        self.inner.takeover.holder(pid)
+    }
+
+    /// 输入门：接管期间非 holder 的输入调用挂起等待（超时 `E_TIMEOUT`）。
+    pub async fn takeover_gate(&self, pid: &Pid, subject: &str) -> HalResult<()> {
+        self.inner
+            .takeover
+            .gate(pid, subject, self.inner.config.takeover_hold_timeout)
+            .await
+    }
+
+    // ---------- 回放导出（P4，docs/03-abi-spec.md obs.replay.export） ----------
+
+    /// 导出回放包：journal 哈希链尾段（未过滤，可离线验链）+ 该 proc 的画面帧。
+    ///
+    /// 进程终止后仍可导出（事后取证）；未知 pid 返回 `E_PROC_NOT_FOUND`。
+    pub fn replay_export(&self, pid: &Pid, journal_limit: usize) -> HalResult<ReplayBundle> {
+        if !self.inner.lock_procs().contains_key(pid) {
+            return Err(not_found(pid));
+        }
+        let journal = self
+            .inner
+            .journal
+            .lines_tail(journal_limit.clamp(1, 4096))
+            .into_iter()
+            .map(|l| ReplayLine {
+                seq: l.seq,
+                prev: l.prev,
+                hash: l.hash,
+                raw: l.raw,
+            })
+            .collect();
+        Ok(ReplayBundle {
+            format_version: REPLAY_FORMAT_VERSION,
+            pid: pid.clone(),
+            engine: self.inner.driver.id().to_owned(),
+            exported_at_ms: crate::security::unix_now_ms(),
+            journal,
+            frames: self.inner.frames.export(pid),
+        })
     }
 
     // ---------- 引擎操作转发 ----------
@@ -535,7 +642,12 @@ impl Kernel {
     }
 
     pub async fn screenshot(&self, pid: &Pid) -> HalResult<Vec<u8>> {
-        self.handle_of(pid)?.screenshot().await
+        let bytes = self.handle_of(pid)?.screenshot().await?;
+        // 采集回放帧（obs.replay.export 数据源）
+        self.inner
+            .frames
+            .record(pid, crate::security::unix_now_ms(), bytes.clone());
+        Ok(bytes)
     }
 
     pub async fn dispatch(&self, pid: &Pid, action: &InputAction) -> HalResult<ActResult> {

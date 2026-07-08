@@ -24,6 +24,10 @@ use crate::snapshot;
 const NAV_TIMEOUT: Duration = Duration::from_secs(10);
 /// 点击/按键后判定"是否引发导航"的观察窗口。
 const NAV_PROBE: Duration = Duration::from_millis(900);
+/// 固定视口尺寸（`process.rs` 启动参数 `--window-size` 用同一常量）；
+/// `act.point.click` 的归一化坐标按此换算为像素（ADR-0010）。
+pub(crate) const VIEWPORT_WIDTH: u32 = 1280;
+pub(crate) const VIEWPORT_HEIGHT: u32 = 800;
 
 struct RefTable {
     generation: u64,
@@ -451,6 +455,18 @@ impl EngineHandle for ChromiumHandle {
                 Ok(ActResult {
                     nav_occurred: false,
                 })
+            }
+            InputAction::ClickAt { x_ratio, y_ratio } => {
+                // 归一化比例 → 本引擎固定视口像素（内核已校验 [0,1]，kernel 也已
+                // 校验调用者持有接管；这里只管坐标换算与单击本身）。
+                let x = x_ratio * f64::from(VIEWPORT_WIDTH);
+                let y = y_ratio * f64::from(VIEWPORT_HEIGHT);
+                let mut rx = self.conn.subscribe();
+                self.click_at(x, y).await?;
+                let nav = self
+                    .wait_on(&mut rx, "Page.loadEventFired", NAV_PROBE)
+                    .await;
+                Ok(ActResult { nav_occurred: nav })
             }
         }
     }

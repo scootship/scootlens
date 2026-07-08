@@ -136,6 +136,11 @@ export class ConsoleApi {
     return this.client.call("act.click", { pid, ref });
   }
 
+  /** 接管期间坐标点击（归一化视口比例 [0,1]）；仅当调用者持有接管时内核放行。 */
+  actClickAt(pid: string, xRatio: number, yRatio: number): Promise<unknown> {
+    return this.client.call("act.point.click", { pid, x_ratio: xRatio, y_ratio: yRatio });
+  }
+
   actType(pid: string, ref: string, text: string): Promise<unknown> {
     return this.client.call("act.type", { pid, ref, text });
   }
@@ -180,6 +185,12 @@ export class ConsoleApi {
   /** vault 单向写入（只写不读）；返回后仅显示 vault_ref 句柄。 */
   vaultWrite(name: string, secret: string): Promise<unknown> {
     return this.client.call("state.write", { namespace: "vault", key: name, value: secret });
+  }
+
+  /** 把登录会话（cookie + localStorage）导入 profile，后续 spawn 该 profile 即带登录态。
+   *  state.import 是敏感操作（🔒）：admin 令牌自动放行，普通令牌会进 Approvals 待批。 */
+  stateImport(profile: string, bundle: unknown): Promise<unknown> {
+    return this.client.call("state.import", { profile, state: bundle });
   }
 
   netRulesGet(pid?: string): Promise<unknown> {

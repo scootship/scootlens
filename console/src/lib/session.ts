@@ -66,3 +66,52 @@ export function takeoverView(holder: string | null, self: string): TakeoverView 
   if (holder === self) return { kind: "held-by-me" };
   return { kind: "held-by-other", holder };
 }
+
+/** 画面上一次点击换算出的归一化视口坐标（`act.point.click` 的 x_ratio/y_ratio）。 */
+export interface ClickRatio {
+  xRatio: number;
+  yRatio: number;
+}
+
+/** 矩形（CSS 像素），左上角 (x,y) + 宽高。 */
+export interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * `object-fit: contain` 布局下，图片实际渲染内容在元素盒子内的矩形
+ * （居中留白 letterbox 已扣除）。CSS 用的是 `contain`（`app.css` `.viewport img`），
+ * 元素盒子尺寸与图片原始宽高比不一致时，四周会留白——点击换算必须先扣掉这部分，
+ * 否则贴边点击会算出错误比例。尺寸非法时返回 null。
+ */
+export function containRect(
+  naturalWidth: number,
+  naturalHeight: number,
+  boxWidth: number,
+  boxHeight: number,
+): Rect | null {
+  if (!(naturalWidth > 0) || !(naturalHeight > 0) || !(boxWidth > 0) || !(boxHeight > 0)) {
+    return null;
+  }
+  const scale = Math.min(boxWidth / naturalWidth, boxHeight / naturalHeight);
+  const width = naturalWidth * scale;
+  const height = naturalHeight * scale;
+  return { x: (boxWidth - width) / 2, y: (boxHeight - height) / 2, width, height };
+}
+
+/**
+ * 把点击事件在元素盒子内的偏移（`offsetX/offsetY`）换算成画面内容矩形
+ * （见 [containRect]）内的 [0,1] 归一化视口比例；矩形之外（letterbox 留白区）
+ * 裁剪到最近边缘，而不是丢弃——避免贴边点击因四舍五入落空。
+ */
+export function clickRatio(offsetX: number, offsetY: number, rect: Rect): ClickRatio | null {
+  if (!(rect.width > 0) || !(rect.height > 0)) return null;
+  const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+  return {
+    xRatio: clamp01((offsetX - rect.x) / rect.width),
+    yRatio: clamp01((offsetY - rect.y) / rect.height),
+  };
+}

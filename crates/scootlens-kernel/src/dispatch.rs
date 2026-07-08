@@ -409,6 +409,35 @@ impl Dispatcher {
                 k.takeover_end(&pid, &caller.subject)?;
                 Ok(json!({ "ok": true }))
             }
+            method::ACT_POINT_CLICK => {
+                let p: PointClickParams = parse(params)?;
+                let pid = parse_pid(&p.pid)?;
+                self.authz(caller, self.scope_at(&["act"], &pid), m).await?;
+                if !p.x_ratio.is_finite()
+                    || !p.y_ratio.is_finite()
+                    || !(0.0..=1.0).contains(&p.x_ratio)
+                    || !(0.0..=1.0).contains(&p.y_ratio)
+                {
+                    return Err(AbiError::new(
+                        ErrorCode::InvalidArg,
+                        "x_ratio/y_ratio must be finite numbers within [0, 1]",
+                    ));
+                }
+                // 故意不走 takeover_gate：坐标点击没有 ref/generation 过期保护，
+                // 排队到接管结束后再执行可能打到完全不同的页面状态（ADR-0010）。
+                // 非 holder（含无接管）一律立即拒绝，不挂起等待。
+                if k.takeover_holder(&pid).as_deref() != Some(caller.subject.as_str()) {
+                    return Err(AbiError::new(
+                        ErrorCode::CapDenied,
+                        format!("act.point.click on {pid} requires the caller to hold takeover"),
+                    ));
+                }
+                let action = InputAction::ClickAt {
+                    x_ratio: p.x_ratio,
+                    y_ratio: p.y_ratio,
+                };
+                Ok(to_value(k.dispatch(&pid, &action).await?))
+            }
             // ---------- js ----------
             method::JS_EXEC => {
                 let p: EvalParams = parse(params)?;
@@ -947,6 +976,14 @@ struct UploadParams {
     r#ref: String,
     /// `uploads/` 沙箱内的相对路径。
     path: String,
+}
+
+/// `act.point.click` 参数：归一化视口坐标（校验在路由里做，见 ADR-0010）。
+#[derive(Deserialize)]
+struct PointClickParams {
+    pid: String,
+    x_ratio: f64,
+    y_ratio: f64,
 }
 
 #[derive(Deserialize)]

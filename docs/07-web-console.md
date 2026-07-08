@@ -58,7 +58,11 @@ v0 单管理员令牌足够。
 - **Dashboard**：`sys.info`（引擎/版本/进程配额水位）+ `proc.list` + Spawn/Kill 生命周期操作
 - **Session**（P4）：`view.screenshot` 轮询 screencast（running 时 ~2fps，帧同时进内核
   FrameStore 供回放）；**人工接管**（`act.takeover.start/end`，接管期间 Agent 输入挂起、
-  归还后恢复）；输入注入面板（语义快照元素清单 → `act.click/type/press` + `nav.goto`）
+  归还后恢复）；输入注入面板（语义快照元素清单 → `act.click/type/press` + `nav.goto`）；
+  **画面直接点击**（[ADR-0010](adr/0010-takeover-point-click.md)）——接管中画面 `<img>`
+  可直接点击，`containRect`/`clickRatio` 纯函数把点击偏移换算成归一化视口坐标 →
+  `act.point.click`（仅当前 holder 可用，非接管中一律拒绝）；元素清单面板保留作为
+  键盘可达的替代路径
 - **Inspector**（P4）：语义快照文本（Agent 视角）、`net.log` 判定表、实时事件流（最近 100 条）
 - **Approvals**：`cap.pending` 收件箱卡片（主体/方法/作用域/理由/时间）→ `cap.approve`（批准 / 批准并记忆 / 拒绝）
 - **Journal**：`obs.journal` 审计表（按 pid 过滤、limit 可调），客户端轻量完整性自证（seq 连续性 + hash 存在性）

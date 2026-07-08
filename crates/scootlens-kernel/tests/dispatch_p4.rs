@@ -288,6 +288,84 @@ async fn kill_clears_takeover_and_wakes_held_input() {
     );
 }
 
+// ================= act.point.click（ADR-0010：接管期间坐标点击） =================
+
+/// 无接管时坐标点击一律拒绝——即便调用者本身持有充分的 `act@origin`。
+#[tokio::test]
+async fn point_click_rejected_without_active_takeover() {
+    let d = dispatcher();
+    let (pid, _) = spawn_on_login(&d).await;
+
+    let resp = call(
+        &d,
+        "act.point.click",
+        json!({ "pid": pid, "x_ratio": 0.5, "y_ratio": 0.5 }),
+    )
+    .await;
+    assert_eq!(err_code(&resp), "E_CAP_DENIED");
+}
+
+/// 非 holder 的坐标点击立即拒绝——不像其他 act.* 那样挂起排队等接管结束
+/// （坐标点击没有 ref/generation 过期保护，排队到未来不确定的页面状态下
+/// 执行是不安全的，见 ADR-0010）。
+#[tokio::test]
+async fn point_click_rejected_immediately_for_non_holder() {
+    let d = dispatcher();
+    let (pid, _) = spawn_on_login(&d).await;
+    ok(&call(&d, "act.takeover.start", json!({ "pid": pid })).await);
+
+    let resp = tokio::time::timeout(
+        Duration::from_millis(300),
+        call_as(
+            &d,
+            &agent(),
+            "act.point.click",
+            json!({ "pid": pid, "x_ratio": 0.5, "y_ratio": 0.5 }),
+        ),
+    )
+    .await
+    .expect("act.point.click must reject immediately, not queue behind takeover_gate");
+    assert_eq!(err_code(&resp), "E_CAP_DENIED");
+}
+
+/// holder 本人的坐标点击在合法比例范围内直接放行。
+#[tokio::test]
+async fn point_click_succeeds_for_holder_with_valid_ratio() {
+    let d = dispatcher();
+    let (pid, _) = spawn_on_login(&d).await;
+    ok(&call(&d, "act.takeover.start", json!({ "pid": pid })).await);
+
+    let resp = call(
+        &d,
+        "act.point.click",
+        json!({ "pid": pid, "x_ratio": 0.5, "y_ratio": 0.5 }),
+    )
+    .await;
+    assert_eq!(ok(&resp)["nav_occurred"], false);
+}
+
+/// 越界比例一律 `E_INVALID_ARG`（即便调用者已是 holder）。
+#[tokio::test]
+async fn point_click_rejects_out_of_range_ratio() {
+    let d = dispatcher();
+    let (pid, _) = spawn_on_login(&d).await;
+    ok(&call(&d, "act.takeover.start", json!({ "pid": pid })).await);
+
+    for (x, y) in [(1.5, 0.5), (0.5, -0.1), (-1.0, 2.0)] {
+        let resp = call(
+            &d,
+            "act.point.click",
+            json!({ "pid": pid, "x_ratio": x, "y_ratio": y }),
+        )
+        .await;
+        assert_eq!(
+            err_code(&resp),
+            "E_INVALID_ARG",
+            "x={x} y={y} should be rejected"
+        );
+    }
+}
+
 // ================= obs.replay.export =================
 
 /// 离线验证链段：首行之后 prev 必须链接前行 hash，且每行 hash = sha256(prev+raw)。

@@ -5,6 +5,8 @@ import {
   acceptsText,
   screencastInterval,
   takeoverView,
+  containRect,
+  clickRatio,
 } from "./session";
 
 const SNAP = [
@@ -65,5 +67,59 @@ describe("takeoverView", () => {
       kind: "held-by-other",
       holder: "user:alice",
     });
+  });
+});
+
+describe("containRect", () => {
+  it("fills the box exactly when aspect ratios match", () => {
+    expect(containRect(1280, 800, 640, 400)).toEqual({ x: 0, y: 0, width: 640, height: 400 });
+  });
+
+  it("letterboxes top/bottom when the box is relatively wider", () => {
+    // 1280x800 图片塞进 1000x1000 方盒：按宽缩放到 1000x625，上下各留白 187.5
+    expect(containRect(1280, 800, 1000, 1000)).toEqual({
+      x: 0,
+      y: 187.5,
+      width: 1000,
+      height: 625,
+    });
+  });
+
+  it("letterboxes left/right when the box is relatively wider than the image (taller aspect)", () => {
+    // 1280x800（宽高比 1.6）塞进 400x200（宽高比 2）：按高缩放，宽度留白
+    // scale = min(400/1280, 200/800) = 0.25 → 320x200，左右各留白 40
+    expect(containRect(1280, 800, 400, 200)).toEqual({ x: 40, y: 0, width: 320, height: 200 });
+  });
+
+  it("rejects non-positive dimensions", () => {
+    expect(containRect(0, 800, 100, 100)).toBeNull();
+    expect(containRect(1280, 0, 100, 100)).toBeNull();
+    expect(containRect(1280, 800, 0, 100)).toBeNull();
+    expect(containRect(1280, 800, 100, -1)).toBeNull();
+  });
+});
+
+describe("clickRatio", () => {
+  const rect = { x: 0, y: 0, width: 128, height: 80 };
+
+  it("normalizes offset against the content rect", () => {
+    expect(clickRatio(64, 40, rect)).toEqual({ xRatio: 0.5, yRatio: 0.5 });
+    expect(clickRatio(0, 0, rect)).toEqual({ xRatio: 0, yRatio: 0 });
+    expect(clickRatio(128, 80, rect)).toEqual({ xRatio: 1, yRatio: 1 });
+  });
+
+  it("subtracts the letterbox offset before normalizing", () => {
+    // 内容矩形从 (0,20) 开始、100x40：偏移 50,40 落在内容矩形中点
+    const letterboxed = { x: 0, y: 20, width: 100, height: 40 };
+    expect(clickRatio(50, 40, letterboxed)).toEqual({ xRatio: 0.5, yRatio: 0.5 });
+  });
+
+  it("clamps offsets outside the content rect to the nearest edge", () => {
+    expect(clickRatio(-10, 200, rect)).toEqual({ xRatio: 0, yRatio: 1 });
+  });
+
+  it("rejects a non-positive content rect", () => {
+    expect(clickRatio(10, 10, { x: 0, y: 0, width: 0, height: 80 })).toBeNull();
+    expect(clickRatio(10, 10, { x: 0, y: 0, width: 128, height: 0 })).toBeNull();
   });
 });

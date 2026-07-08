@@ -115,6 +115,15 @@ describe("ConsoleApi", () => {
     expect(calls[2].params).toEqual({ pid: "p-1", keys: "Enter" });
   });
 
+  it("actClickAt forwards normalized ratio payload", async () => {
+    const { api, calls } = stub({ "act.point.click": {} });
+    await api.actClickAt("p-1", 0.25, 0.75);
+    expect(calls[0]).toEqual({
+      method: "act.point.click",
+      params: { pid: "p-1", x_ratio: 0.25, y_ratio: 0.75 },
+    });
+  });
+
   it("takeover start/end delegate to act.takeover.*", async () => {
     const { api, calls } = stub({
       "act.takeover.start": { ok: true, holder: "user:admin" },

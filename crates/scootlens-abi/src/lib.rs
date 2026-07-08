@@ -32,4 +32,4 @@ pub use scope::{ParseScopeError, Scope, origin_matches};
 pub use wf::{WfRetry, WfSpec, WfStep, WfTrigger};
 
 /// ABI 版本。v0 期间允许破坏性变更（需 ADR）；v1 起向后兼容。
-pub const ABI_VERSION: &str = "0.2.0";
+pub const ABI_VERSION: &str = "0.3.0";

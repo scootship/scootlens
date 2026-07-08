@@ -9,12 +9,14 @@
 //! - `evt.subscribe` / `evt.unsubscribe` 是**连接级**语义：订阅表挂在连接上，
 //!   命中的总线事件以 `evt.event` server notification 推送
 //! - `console_dir` 配置后在 `/` 托管 Web Console 静态文件
+//! - 服务端 WS 保活：周期 Ping + 入站空闲超时回收（反代/NAT 静默断链防护）
 //! - 非法 JSON → `-32700`；合法 JSON 但非法请求 → `-32600`
 
 mod conn;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{Query, State, WebSocketUpgrade};
@@ -25,10 +27,24 @@ use scootlens_kernel::{Caller, Dispatcher};
 use serde::Deserialize;
 
 /// 网关配置。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct GatewayConfig {
     /// Web Console 静态目录（`None` = 不托管）。
     pub console_dir: Option<PathBuf>,
+    /// 服务端 WS Ping 间隔（保活反代/NAT 链路）。
+    pub ws_ping_interval: Duration,
+    /// 入站空闲超时：超过该时长无任何入站帧（含 Pong）即关闭连接。
+    pub ws_idle_timeout: Duration,
+}
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            console_dir: None,
+            ws_ping_interval: Duration::from_secs(15),
+            ws_idle_timeout: Duration::from_secs(45),
+        }
+    }
 }
 
 /// WS JSON-RPC 网关。
@@ -40,12 +56,19 @@ pub struct Gateway {
 #[derive(Clone)]
 struct AppState {
     dispatcher: Dispatcher,
+    keepalive: conn::Keepalive,
 }
 
 impl Gateway {
     pub fn new(dispatcher: Dispatcher, config: GatewayConfig) -> Self {
         Self {
-            state: AppState { dispatcher },
+            state: AppState {
+                dispatcher,
+                keepalive: conn::Keepalive {
+                    ping_interval: config.ws_ping_interval,
+                    idle_timeout: config.ws_idle_timeout,
+                },
+            },
             config,
         }
     }
@@ -85,5 +108,6 @@ async fn ws_handler(
         Err(_) => return (StatusCode::UNAUTHORIZED, "invalid token").into_response(),
     };
     let caller = Arc::new(Caller::from_claims(claims));
-    ws.on_upgrade(move |socket| conn::run(socket, state.dispatcher, caller))
+    let keepalive = state.keepalive;
+    ws.on_upgrade(move |socket| conn::run(socket, state.dispatcher, caller, keepalive))
 }

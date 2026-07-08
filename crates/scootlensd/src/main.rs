@@ -107,6 +107,7 @@ async fn run(args: Args) -> Result<(), String> {
         Dispatcher::new(kernel),
         GatewayConfig {
             console_dir: args.console_dir.clone(),
+            ..GatewayConfig::default()
         },
     );
 

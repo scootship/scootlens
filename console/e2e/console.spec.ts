@@ -212,6 +212,7 @@ test("settings: token scopes, grant/revoke, vault write-only, net rules", async 
   await expect(page.getByTestId("settings-notice")).toContainText("已授予");
 
   // vault 只写不读：写入后仅显示句柄
+  await page.getByTestId("subtab-vault").click();
   await page.getByTestId("vault-name").fill("demo-cred");
   await page.getByTestId("vault-secret").fill("s3cret-value");
   await page.getByTestId("vault-write").click();
@@ -219,9 +220,99 @@ test("settings: token scopes, grant/revoke, vault write-only, net rules", async 
   await expect(page.getByTestId("vault-secret")).toHaveValue("");
 
   // 全局网络规则
+  await page.getByTestId("subtab-network").click();
   await page
     .getByTestId("net-rules")
     .fill('{ "default": "allow", "rules": [ { "action": "deny", "host": "blocked.test" } ] }');
   await page.getByTestId("net-rules-apply").click();
   await expect(page.getByTestId("settings-notice")).toContainText("网络规则已生效");
+});
+
+test("settings: import login session from pasted cookies → profile reuse", async ({ page }) => {
+  await connectAsAdmin(page);
+  await page.getByTestId("tab-settings").click();
+  await page.getByTestId("subtab-session").click();
+
+  const cookiesJson = JSON.stringify([
+    { name: "session", value: "SECRET-httponly", domain: "fixture.test", path: "/", secure: true, httpOnly: true },
+    { name: "pref", value: "dark", domain: "fixture.test", path: "/", secure: false, httpOnly: false },
+  ]);
+
+  await page.getByTestId("import-profile").fill("gh");
+  await page.getByTestId("import-cookies").fill(cookiesJson);
+  await page.getByTestId("import-storage").fill('{ "auth": "jwt-abc" }');
+
+  // 粘贴即时预览：2 cookie（httpOnly 1）+ 1 storage
+  await expect(page.getByTestId("import-preview")).toContainText("httpOnly 1");
+
+  await page.getByTestId("import-session").click();
+  await expect(page.getByTestId("settings-notice")).toContainText("已导入 profile");
+  // 成功后清空粘贴区
+  await expect(page.getByTestId("import-cookies")).toHaveValue("");
+
+  // 回环校验：以该 profile spawn，导出应带回 httpOnly 会话 cookie。
+  const admin = new AgentWs(ADMIN());
+  try {
+    const sp = await admin.call("proc.spawn", { profile: "gh" });
+    const pid = (sp.result as { pid: string }).pid;
+    const ex = await admin.call("state.export", { pid });
+    const entries = (ex.result as { state: { entries: Record<string, unknown> } }).state.entries;
+    expect(entries["cookie:session"]).toMatchObject({ value: "SECRET-httponly", httpOnly: true });
+    expect(entries["storage:auth"]).toBe("jwt-abc");
+    await admin.call("proc.kill", { pid });
+  } finally {
+    admin.close();
+  }
+});
+
+test("session: spawn with imported profile → logged-in session ready for takeover", async ({ page }) => {
+  await connectAsAdmin(page);
+
+  // 先导入一个带 httpOnly 会话 cookie 的 profile。
+  await page.getByTestId("tab-settings").click();
+  await page.getByTestId("subtab-session").click();
+  await page.getByTestId("import-profile").fill("reuse");
+  await page.getByTestId("import-cookies").fill(
+    JSON.stringify([
+      { name: "session", value: "LIVE-httponly", domain: "fixture.test", path: "/", secure: true, httpOnly: true },
+    ]),
+  );
+  await page.getByTestId("import-session").click();
+  await expect(page.getByTestId("settings-notice")).toContainText("已导入 profile");
+
+  // 到 Session 页：导入过的 profile 会出现在下拉里，选中它 → 「新开会话」。
+  await page.getByTestId("tab-session").click();
+  await page.getByTestId("spawn-profile").selectOption("reuse");
+
+  const pidSelect = page.getByTestId("session-pid");
+  const admin = new AgentWs(ADMIN());
+  try {
+    // 用权威的 proc.list 做 spawn 前/后差集，精确锁定本次 UI 新开的进程，
+    // 不受共享内核里其他测试残留进程的干扰。
+    const listPids = async () =>
+      ((await admin.call("proc.list")).result as { procs: { pid: string }[] }).procs.map((p) => p.pid);
+    const before = new Set(await listPids());
+
+    await page.getByTestId("spawn-with-profile").click();
+
+    let pid = "";
+    await expect
+      .poll(async () => {
+        pid = (await listPids()).find((p) => !before.has(p)) ?? "";
+        return pid;
+      })
+      .toMatch(/^p-/);
+
+    // UI 也应自动选中这个新开的进程（下拉联动），且 running → 接管按钮可用。
+    await expect(pidSelect).toHaveValue(pid);
+    await expect(page.getByTestId("takeover")).toBeEnabled();
+
+    // 该 console 新开的进程确实预加载了导入的登录态（httpOnly cookie 回灌）。
+    const ex = await admin.call("state.export", { pid });
+    const entries = (ex.result as { state: { entries: Record<string, unknown> } }).state.entries;
+    expect(entries["cookie:session"]).toMatchObject({ value: "LIVE-httponly", httpOnly: true });
+    await admin.call("proc.kill", { pid });
+  } finally {
+    admin.close();
+  }
 });

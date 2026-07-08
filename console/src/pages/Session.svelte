@@ -11,6 +11,7 @@
     type SnapshotElement,
     type TakeoverView,
   } from "../lib/session";
+  import { listProfiles, rememberProfile } from "../lib/profiles";
 
   let { api, pulse, self }: { api: ConsoleApi; pulse: number; self: string } = $props();
 
@@ -23,11 +24,16 @@
   let gotoUrl = $state("");
   let error = $state<string | null>(null);
   let live = $state(true);
-  let spawnProfile = $state("");
+  const NEW_PROFILE = "__new__";
+  let knownProfiles = $state<string[]>(listProfiles());
+  let profileChoice = $state<string>(listProfiles()[0] ?? "");
+  let newProfile = $state("");
   let spawning = $state(false);
 
   const view = $derived<TakeoverView>(takeoverView(holder, self));
   const procState = $derived(procs.find((p) => p.pid === pid)?.state ?? null);
+  // 实际用于 spawn 的 profile 名：新建时取输入框，否则取下拉选中项（空=默认空白会话）。
+  const effProfile = $derived(profileChoice === NEW_PROFILE ? newProfile.trim() : profileChoice.trim());
 
   async function refreshProcs() {
     try {
@@ -38,12 +44,19 @@
     }
   }
 
-  /** 用指定 profile 新开会话：spawn 时预加载该 profile 的登录态（cookie），
-   *  随后即可导航 + 接管，带登录态操作。profile 留空则默认空白会话。 */
+  /** 用选中的 profile 新开会话：spawn 时预加载该 profile 的登录态（cookie），
+   *  随后即可导航 + 接管，带登录态操作。profile 留空则默认空白会话。
+   *  成功后把 profile 名记入本地下拉，方便下次直接选。 */
   async function spawnWithProfile() {
     spawning = true;
     try {
-      const newPid = await api.procSpawn(spawnProfile.trim() || undefined);
+      const prof = effProfile;
+      const newPid = await api.procSpawn(prof || undefined);
+      if (prof) {
+        knownProfiles = rememberProfile(prof);
+        profileChoice = prof;
+        newProfile = "";
+      }
       await refreshProcs();
       pid = newPid;
       error = null;
@@ -172,13 +185,27 @@
 
 <div class="section-head">
   <h2>Session</h2>
-  <input
-    class="profile-in"
-    placeholder="profile（登录态）"
-    bind:value={spawnProfile}
-    data-testid="spawn-profile"
-  />
-  <button class="primary" onclick={spawnWithProfile} disabled={spawning} data-testid="spawn-with-profile">
+  <select class="profile-in" bind:value={profileChoice} data-testid="spawn-profile" title="选择要复用登录态的 profile">
+    <option value="">（默认·空白）</option>
+    {#each knownProfiles as p (p)}
+      <option value={p}>{p}</option>
+    {/each}
+    <option value={NEW_PROFILE}>＋ 新建…</option>
+  </select>
+  {#if profileChoice === NEW_PROFILE}
+    <input
+      class="profile-in"
+      placeholder="新 profile 名"
+      bind:value={newProfile}
+      data-testid="spawn-profile-new"
+    />
+  {/if}
+  <button
+    class="primary"
+    onclick={spawnWithProfile}
+    disabled={spawning || (profileChoice === NEW_PROFILE && !newProfile.trim())}
+    data-testid="spawn-with-profile"
+  >
     {spawning ? "启动中…" : "新开会话"}
   </button>
   <select bind:value={pid} data-testid="session-pid">
@@ -205,7 +232,7 @@
 {/if}
 
 {#if !pid}
-  <div class="empty">无进程可查看。上方填 profile 名点「新开会话」，或在 Dashboard 里 Spawn。</div>
+  <div class="empty">无进程可查看。上方选 profile 点「新开会话」，或在 Dashboard 里 Spawn。</div>
 {:else}
   <div class="split">
     <div class="card viewport">

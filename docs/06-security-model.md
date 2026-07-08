@@ -11,15 +11,27 @@
 
 ### 令牌
 
+**Claims**（`scootlens-abi::TokenClaims`，签名前的载荷）：
+
 ```json
 {
   "subject": "agent:ops-bot-1",
   "scopes": ["nav@*.example.com", "view@*.example.com", "act@app.example.com", "vault:use"],
-  "constraints": { "expires_at": "...", "rate": "60/min", "approval": {"js:exec@*": "manual"} },
-  "issued_by": "user:admin",
-  "sig": "ed25519:…"
+  "constraints": { "expires_at": 1735689600, "rate": "60/min", "approval": {"js:exec@*": "manual"} },
+  "issued_by": "user:admin"
 }
 ```
+
+**Wire 格式**（见 [ADR-0007](adr/0007-token-wire-format.md)）：
+
+```
+slt1.<base64url(claims_json)>.<base64url(ed25519_sig)>
+```
+
+- 前缀 `slt1` 标识版本；两段均为 URL-safe base64（无填充）
+- 签名覆盖 claims 字节；内核持有签发密钥（ed25519），握手时验签失败一律 `E_CAP_DENIED`
+- `expires_at` 为 unix 秒；`rate` 形如 `N/min` 或 `N/sec`，滑动窗口，超限 `E_QUOTA`
+- 令牌经 Gateway **连接握手**提交（不在每条 RPC 帧内），校验通过后连接绑定到解析出的 `Caller`
 
 ### 作用域语法
 
@@ -57,5 +69,7 @@
 
 ## 秘密管理
 
-- vault 后端：OS keyring（macOS Keychain / Secret Service），无 keyring 环境退化为 age 加密文件（密钥由部署者持有）
+- vault 后端：**P2 为 ChaCha20-Poly1305 加密文件**（`<state-dir>/vault/vault.enc`）+ 独立 32 字节密钥文件（`vault.key`，权限 `0600`）；OS keyring（macOS Keychain / Secret Service）为后续演进
+- vault **只写不读**：`state.read` 命中 `vault` 命名空间恒返回 `E_CAP_DENIED`；值仅在驱动注入输入（`act.type` 的 `vault_ref`）瞬间由内核解引用
+- 出口消毒：对注入过 vault 值的调用，内核对所有 syscall 返回值统一扫描替换，杜绝值经 snapshot/journal/trace 回流（红队 T2 零泄漏断言覆盖）
 - 仓库零明文密钥：gitleaks 进 CI 门禁

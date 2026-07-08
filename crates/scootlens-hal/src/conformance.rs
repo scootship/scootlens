@@ -15,12 +15,17 @@
 //! - `/`：document "Fixture Home"，含 heading "Fixture Home" 与 link "Go to Login"（点击 → `/login`）
 //! - `/login`：document "Login"，含 textbox "Username"、textbox "Password"、button "Sign in"（点击 → `/welcome`）
 //! - `/welcome`：document "Welcome"，含 heading "Welcome"
+//! - `/widgets`：document "Widgets"，含 combobox "Color"（选项 red/green/blue，初始 red）
+
+use std::sync::Arc;
 
 use scootlens_abi::ErrorCode;
+use scootlens_abi::{NetDecision, NetRequestSummary};
 use url::Url;
 
 use crate::{
-    EngineDriver, EngineHandle, HistoryDir, InputAction, ProfileSpec, SnapshotOpts, StateBundle,
+    EngineDriver, EngineEvent, EngineHandle, HistoryDir, InputAction, ProfileSpec, RequestPolicy,
+    SnapshotOpts, StateBundle,
 };
 
 /// 一致性测试目标：驱动 + 标准 fixture 站点基地址。
@@ -185,6 +190,77 @@ pub async fn state_roundtrip_or_unsupported(t: &Target) {
     }
 }
 
+/// 下拉选择后新快照反映所选值。
+pub async fn select_updates_value(t: &Target) {
+    let h = t.spawn().await;
+    h.navigate(&t.url("/widgets")).await.expect("navigate");
+    let s = h.snapshot(&SnapshotOpts::default()).await.expect("snap");
+    let combo = s
+        .find("combobox", "Color")
+        .and_then(|n| n.elem_ref.clone())
+        .expect("combobox ref");
+    h.dispatch(&InputAction::Select {
+        target: combo,
+        values: vec!["green".into()],
+    })
+    .await
+    .expect("select");
+    let s2 = h.snapshot(&SnapshotOpts::default()).await.expect("snap2");
+    let val = s2.find("combobox", "Color").and_then(|n| n.value.clone());
+    assert_eq!(val.as_deref(), Some("green"));
+}
+
+struct DenyAll;
+
+impl RequestPolicy for DenyAll {
+    fn decide(&self, _req: &NetRequestSummary) -> NetDecision {
+        NetDecision::Deny
+    }
+}
+
+/// 请求策略强制：拒策略下主文档导航失败为 E_NET_BLOCKED 且发出
+/// `NetRequest{allowed:false}` 事件；清除策略后恢复。
+/// 无 `net_rules` 能力的驱动对 `set_request_policy` 返回 E_UNSUPPORTED。
+pub async fn request_policy_enforced_or_unsupported(t: &Target) {
+    let h = t.spawn().await;
+    if !t.driver.capabilities().net_rules {
+        let err = h
+            .set_request_policy(Some(Arc::new(DenyAll)))
+            .await
+            .expect_err("must be unsupported");
+        assert_eq!(err.code, ErrorCode::Unsupported);
+        return;
+    }
+
+    let mut events = h.events();
+    h.set_request_policy(Some(Arc::new(DenyAll)))
+        .await
+        .expect("set policy");
+    let err = h
+        .navigate(&t.url("/"))
+        .await
+        .expect_err("blocked navigation must fail");
+    assert_eq!(err.code, ErrorCode::NetBlocked);
+
+    let deadline = std::time::Duration::from_secs(5);
+    let seen = tokio::time::timeout(deadline, async {
+        loop {
+            match events.recv().await {
+                Ok(EngineEvent::NetRequest { allowed, .. }) if !allowed => break true,
+                Ok(_) => continue,
+                Err(_) => break false,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(seen, "must emit NetRequest{{allowed:false}} event");
+
+    h.set_request_policy(None).await.expect("clear policy");
+    let nav = h.navigate(&t.url("/")).await.expect("navigate after clear");
+    assert_eq!(nav.title, "Fixture Home");
+}
+
 /// history back/forward 与 reload 语义。
 pub async fn history_and_reload_work(t: &Target) {
     let h = t.spawn().await;
@@ -259,6 +335,18 @@ macro_rules! conformance_run_all {
             async fn state_roundtrip_or_unsupported() {
                 let t = ($factory)().await;
                 $crate::conformance::state_roundtrip_or_unsupported(&t).await;
+            }
+
+            #[tokio::test]
+            async fn select_updates_value() {
+                let t = ($factory)().await;
+                $crate::conformance::select_updates_value(&t).await;
+            }
+
+            #[tokio::test]
+            async fn request_policy_enforced_or_unsupported() {
+                let t = ($factory)().await;
+                $crate::conformance::request_policy_enforced_or_unsupported(&t).await;
             }
 
             #[tokio::test]

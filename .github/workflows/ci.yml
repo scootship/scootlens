@@ -142,3 +142,24 @@ jobs:
           SCOOTLENS_CHROMIUM_BIN: ${{ steps.chrome.outputs.chrome-path }}
           SCOOTLENS_CHROMIUM_EXTRA_ARGS: "--no-sandbox --disable-dev-shm-usage --disable-gpu"
         run: cargo test -p scootlensd --test e2e -- --ignored --test-threads=1 --nocapture
+
+  # 门禁 11：Web Console 构建 + 单元测试 + 覆盖率 ≥ 80%（docs/07-web-console.md）
+  console:
+    name: console (svelte)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: console
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+      - name: npm ci
+        run: npm ci
+      - name: unit tests + coverage (>= 80%)
+        run: npm run coverage
+      - name: type-check + build
+        run: npm run build

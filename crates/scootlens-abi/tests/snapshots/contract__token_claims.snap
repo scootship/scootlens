@@ -1,0 +1,20 @@
+---
+source: crates/scootlens-abi/tests/contract.rs
+expression: claims
+---
+{
+  "subject": "agent:ops-bot-1",
+  "scopes": [
+    "nav@*.example.com",
+    "vault:use"
+  ],
+  "constraints": {
+    "expires_at": 1900000000,
+    "rate": "60/min",
+    "approval": {
+      "js:exec": "manual"
+    }
+  },
+  "issued_by": "user:admin",
+  "issued_at": 1800000000
+}

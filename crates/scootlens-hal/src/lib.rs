@@ -9,7 +9,7 @@ pub mod conformance;
 mod driver;
 mod types;
 
-pub use driver::{EngineDriver, EngineHandle, HalResult};
+pub use driver::{EngineDriver, EngineHandle, HalResult, RequestPolicy};
 pub use types::{
     A11yNode, A11ySnapshot, ActResult, EngineCaps, EngineEvent, EngineMetrics, HistoryDir,
     InputAction, NavResult, ProfileSpec, SnapshotOpts, StateBundle,

@@ -11,15 +11,27 @@
 
 mod bus;
 mod dispatch;
+mod journal;
+mod netstack;
 mod proc;
+mod redact;
+mod security;
+mod vfs;
 
 pub use bus::{BusEvent, BusPayload};
 pub use dispatch::Dispatcher;
+pub use journal::{Journal, JournalEntry, JournalKind, JournalLine, parse_lines};
+pub use netstack::{NetStack, ProcPolicy};
 pub use proc::{ProcInfo, ProcState};
+pub use redact::Redactor;
+pub use security::{AuthzGate, Caller, SecurityManager};
+pub use vfs::StateVfs;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use scootlens_abi::{AbiError, ErrorCode, Pid};
 use scootlens_hal::{
@@ -37,6 +49,11 @@ pub struct KernelConfig {
     pub max_procs: usize,
     /// Event Bus 缓冲容量（慢订阅者会丢事件并收到 Lagged）。
     pub bus_capacity: usize,
+    /// 状态目录（journal / keys / vault / downloads / uploads）。
+    /// None = 内存模式（测试）。
+    pub state_dir: Option<PathBuf>,
+    /// 人工审批的调用内等待上限；超时返回 `E_APPROVAL_PENDING`。
+    pub approval_timeout: Duration,
 }
 
 impl Default for KernelConfig {
@@ -44,6 +61,8 @@ impl Default for KernelConfig {
         Self {
             max_procs: 8,
             bus_capacity: 1024,
+            state_dir: None,
+            approval_timeout: Duration::from_secs(60),
         }
     }
 }
@@ -67,6 +86,8 @@ struct ProcEntry {
     /// 占用的调度槽位；Terminated/Crashed 时释放。
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
     supervisor: Option<tokio::task::JoinHandle<()>>,
+    /// 当前页面 URL（origin 鉴权依据）。
+    current_url: Option<Url>,
 }
 
 struct Inner {
@@ -77,6 +98,11 @@ struct Inner {
     bus: broadcast::Sender<BusEvent>,
     seq: AtomicU64,
     pid_counter: AtomicU64,
+    security: SecurityManager,
+    journal: Journal,
+    vfs: StateVfs,
+    netstack: Arc<NetStack>,
+    redactor: Redactor,
 }
 
 impl Inner {
@@ -117,10 +143,27 @@ pub struct Kernel {
 }
 
 impl Kernel {
+    /// 内存模式构造（state_dir 必须为 None；测试与嵌入场景）。
     pub fn new(driver: Arc<dyn EngineDriver>, config: KernelConfig) -> Self {
+        assert!(
+            config.state_dir.is_none(),
+            "use Kernel::open for a state dir"
+        );
+        Self::open(driver, config).expect("memory-mode kernel init cannot fail")
+    }
+
+    /// 完整构造：初始化安全/journal/VFS/网络栈（state_dir 可选）。
+    pub fn open(driver: Arc<dyn EngineDriver>, config: KernelConfig) -> std::io::Result<Self> {
+        let state_dir = config.state_dir.clone();
+        let security = SecurityManager::load_or_generate(state_dir.as_deref())?;
+        let journal = match &state_dir {
+            Some(dir) => Journal::open(dir)?,
+            None => Journal::in_memory(),
+        };
+        let vfs = StateVfs::open(state_dir.as_deref())?;
         let (bus, _) = broadcast::channel(config.bus_capacity);
         let slots = Arc::new(Semaphore::new(config.max_procs));
-        Self {
+        Ok(Self {
             inner: Arc::new(Inner {
                 driver,
                 config,
@@ -129,21 +172,79 @@ impl Kernel {
                 bus,
                 seq: AtomicU64::new(0),
                 pid_counter: AtomicU64::new(0),
+                security,
+                journal,
+                vfs,
+                netstack: Arc::new(NetStack::default()),
+                redactor: Redactor::default(),
             }),
-        }
+        })
+    }
+
+    // ---------- P2 子系统访问 ----------
+
+    pub fn security(&self) -> &SecurityManager {
+        &self.inner.security
+    }
+
+    pub fn journal(&self) -> &Journal {
+        &self.inner.journal
+    }
+
+    pub fn vfs(&self) -> &StateVfs {
+        &self.inner.vfs
+    }
+
+    pub fn netstack(&self) -> &NetStack {
+        &self.inner.netstack
+    }
+
+    pub fn redactor(&self) -> &Redactor {
+        &self.inner.redactor
+    }
+
+    /// 审批等待上限。
+    pub fn approval_timeout(&self) -> Duration {
+        self.inner.config.approval_timeout
+    }
+
+    /// 发布事件到总线（dispatch 层发 `cap.request` 用）。
+    pub(crate) fn emit(&self, pid: Option<Pid>, payload: BusPayload) {
+        self.inner.emit(pid, payload);
+    }
+
+    /// 当前页面 origin（`host[:port]`，仅显式端口带端口）。
+    pub fn current_origin(&self, pid: &Pid) -> Option<String> {
+        let procs = self.inner.lock_procs();
+        procs
+            .get(pid)
+            .and_then(|e| e.current_url.as_ref())
+            .and_then(origin_of)
     }
 
     // ---------- Process Manager ----------
 
     /// 启动进程。并发上限已满时排队（FIFO），直到有槽位释放。
-    pub async fn spawn(&self, profile: ProfileSpec) -> HalResult<Pid> {
+    pub async fn spawn(&self, mut profile: ProfileSpec) -> HalResult<Pid> {
         let permit = Arc::clone(&self.inner.slots)
             .acquire_owned()
             .await
             .map_err(|_| AbiError::new(ErrorCode::Internal, "scheduler closed"))?;
 
+        if profile.download_dir.is_none() {
+            profile.download_dir = self.inner.vfs.downloads_dir();
+        }
         let handle: Arc<dyn EngineHandle> = Arc::from(self.inner.driver.spawn(&profile).await?);
         let pid = self.inner.next_pid();
+
+        // 网络强制：驱动支持 net_rules 时装 per-proc 策略（默认规则全放行）
+        if self.inner.driver.capabilities().net_rules {
+            let policy = Arc::new(ProcPolicy::new(
+                Arc::clone(&self.inner.netstack),
+                pid.clone(),
+            ));
+            handle.set_request_policy(Some(policy)).await?;
+        }
 
         let supervisor = tokio::spawn(supervise(
             Arc::clone(&self.inner),
@@ -160,6 +261,7 @@ impl Kernel {
                 handle: Some(handle),
                 permit: Some(permit),
                 supervisor: Some(supervisor),
+                current_url: None,
             },
         );
         self.inner.emit(
@@ -227,6 +329,7 @@ impl Kernel {
             let _ = h.shutdown().await;
         }
         drop(permit);
+        self.inner.netstack.drop_proc(pid);
         self.inner.emit(
             Some(pid.clone()),
             BusPayload::ProcLifecycle {
@@ -253,7 +356,9 @@ impl Kernel {
     }
 
     pub async fn navigate(&self, pid: &Pid, url: &Url) -> HalResult<NavResult> {
-        self.handle_of(pid)?.navigate(url).await
+        let nav = self.handle_of(pid)?.navigate(url).await?;
+        self.set_current_url(pid, nav.url.clone());
+        Ok(nav)
     }
 
     pub async fn page_info(&self, pid: &Pid) -> HalResult<NavResult> {
@@ -261,11 +366,21 @@ impl Kernel {
     }
 
     pub async fn history(&self, pid: &Pid, dir: HistoryDir) -> HalResult<NavResult> {
-        self.handle_of(pid)?.history(dir).await
+        let nav = self.handle_of(pid)?.history(dir).await?;
+        self.set_current_url(pid, nav.url.clone());
+        Ok(nav)
     }
 
     pub async fn reload(&self, pid: &Pid) -> HalResult<NavResult> {
-        self.handle_of(pid)?.reload().await
+        let nav = self.handle_of(pid)?.reload().await?;
+        self.set_current_url(pid, nav.url.clone());
+        Ok(nav)
+    }
+
+    fn set_current_url(&self, pid: &Pid, url: Url) {
+        if let Some(e) = self.inner.lock_procs().get_mut(pid) {
+            e.current_url = Some(url);
+        }
     }
 
     pub async fn snapshot(&self, pid: &Pid, opts: &SnapshotOpts) -> HalResult<A11ySnapshot> {
@@ -291,6 +406,18 @@ impl Kernel {
 
     pub async fn metrics(&self, pid: &Pid) -> HalResult<EngineMetrics> {
         self.handle_of(pid)?.metrics().await
+    }
+
+    pub async fn export_state(&self, pid: &Pid) -> HalResult<scootlens_hal::StateBundle> {
+        self.handle_of(pid)?.export_state().await
+    }
+
+    pub async fn import_state(
+        &self,
+        pid: &Pid,
+        bundle: &scootlens_hal::StateBundle,
+    ) -> HalResult<()> {
+        self.handle_of(pid)?.import_state(bundle).await
     }
 
     // ---------- Event Bus / sys ----------
@@ -322,6 +449,15 @@ fn not_found(pid: &Pid) -> AbiError {
     AbiError::new(ErrorCode::ProcNotFound, format!("proc {pid} not found"))
 }
 
+/// URL → 规范化 origin（`host` 或 `host:port`，仅显式端口带端口）。
+pub fn origin_of(url: &Url) -> Option<String> {
+    let host = url.host_str()?;
+    Some(match url.port() {
+        Some(p) => format!("{host}:{p}"),
+        None => host.to_owned(),
+    })
+}
+
 /// 崩溃监督 + 引擎事件转发：驱动事件流 → 内核总线。
 async fn supervise(inner: Arc<Inner>, pid: Pid, mut events: broadcast::Receiver<EngineEvent>) {
     loop {
@@ -349,10 +485,19 @@ async fn supervise(inner: Arc<Inner>, pid: Pid, mut events: broadcast::Receiver<
                 break;
             }
             Ok(EngineEvent::Navigated { url }) => {
+                if let Some(e) = inner.lock_procs().get_mut(&pid) {
+                    e.current_url = Some(url.clone());
+                }
                 inner.emit(Some(pid.clone()), BusPayload::Navigated { url });
             }
             Ok(EngineEvent::ConsoleLog { text }) => {
                 inner.emit(Some(pid.clone()), BusPayload::ConsoleLog { text });
+            }
+            Ok(EngineEvent::NetRequest { summary, allowed }) => {
+                inner.emit(
+                    Some(pid.clone()),
+                    BusPayload::NetRequest { summary, allowed },
+                );
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
                 tracing::warn!(%pid, dropped = n, "engine event stream lagged");

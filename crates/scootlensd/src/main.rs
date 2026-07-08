@@ -1,9 +1,11 @@
 //! scootlensd：守护进程组装点（driver → kernel → dispatcher → gateway）。
 
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, ValueEnum};
-use rand::RngCore;
+use scootlens_abi::{ApprovalMode, TokenClaims, TokenConstraints};
 use scootlens_driver_chromium::ChromiumDriver;
 use scootlens_driver_mock::MockDriver;
 use scootlens_gateway::{Gateway, GatewayConfig};
@@ -31,9 +33,13 @@ struct Args {
     #[arg(long, value_enum, default_value_t = Engine::Chromium)]
     engine: Engine,
 
-    /// 全权令牌（P1 骨架）。缺省时随机生成并打印。
-    #[arg(long, env = "SCOOTLENS_TOKEN")]
-    token: Option<String>,
+    /// 状态目录（密钥/journal/vault/downloads/uploads）。缺省 = 纯内存模式。
+    #[arg(long, env = "SCOOTLENS_STATE_DIR")]
+    state_dir: Option<PathBuf>,
+
+    /// Web Console 静态目录；设置后在 `/` 托管。
+    #[arg(long)]
+    console_dir: Option<PathBuf>,
 
     /// 最大并发引擎进程数。
     #[arg(long, default_value_t = 8)]
@@ -58,22 +64,35 @@ async fn run(args: Args) -> Result<(), String> {
         Engine::Chromium => Arc::new(ChromiumDriver::discover().map_err(|e| e.to_string())?),
     };
 
-    let token = args.token.unwrap_or_else(|| {
-        let mut r = rand::rng();
-        let t = format!("sl-{:016x}{:016x}", r.next_u64(), r.next_u64());
-        // 缺省令牌必须让操作者看到一次（仅打印，不落盘）
-        println!("generated token: {t}");
-        t
-    });
+    let config = KernelConfig {
+        max_procs: args.max_procs,
+        state_dir: args.state_dir.clone(),
+        ..KernelConfig::default()
+    };
+    let kernel = Kernel::open(driver, config).map_err(|e| format!("kernel: {e}"))?;
 
-    let kernel = Kernel::new(
-        driver,
-        KernelConfig {
-            max_procs: args.max_procs,
-            ..KernelConfig::default()
+    // 管理员令牌：全作用域 + 全自动审批。仅打印一次，不落盘。
+    let mut constraints = TokenConstraints::default();
+    constraints.approval.insert("*".into(), ApprovalMode::Auto);
+    let admin = TokenClaims {
+        subject: "user:admin".into(),
+        scopes: vec!["*".parse().map_err(|e| format!("{e}"))?],
+        constraints,
+        issued_by: "scootlensd".into(),
+        issued_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default(),
+    };
+    let token = kernel.security().issue(&admin);
+    println!("admin token: {token}");
+
+    let gateway = Gateway::new(
+        Dispatcher::new(kernel),
+        GatewayConfig {
+            console_dir: args.console_dir,
         },
     );
-    let gateway = Gateway::new(Dispatcher::new(kernel), GatewayConfig { token });
 
     let listener = tokio::net::TcpListener::bind(&args.listen)
         .await

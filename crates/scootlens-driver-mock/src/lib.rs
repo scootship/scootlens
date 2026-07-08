@@ -15,10 +15,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use scootlens_abi::{AbiError, ElementRef, ErrorCode};
+use scootlens_abi::{AbiError, ElementRef, ErrorCode, NetRequestSummary};
 use scootlens_hal::{
     A11ySnapshot, ActResult, EngineCaps, EngineDriver, EngineEvent, EngineHandle, EngineMetrics,
-    HalResult, HistoryDir, InputAction, NavResult, ProfileSpec, SnapshotOpts, StateBundle,
+    HalResult, HistoryDir, InputAction, NavResult, ProfileSpec, RequestPolicy, SnapshotOpts,
+    StateBundle,
 };
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -48,7 +49,7 @@ impl MockDriver {
                 screenshot: true,
                 input: true,
                 eval: true,
-                net_rules: false,
+                net_rules: true,
                 state: true,
                 events: true,
                 metrics: true,
@@ -116,6 +117,16 @@ impl MockDriver {
                 "/welcome",
                 PageModel::document("Welcome").child(NodeModel::heading("Welcome")),
             )
+            .page(
+                "/widgets",
+                PageModel::document("Widgets")
+                    .child(NodeModel::combobox(
+                        "Color",
+                        &["red", "green", "blue"],
+                        "red",
+                    ))
+                    .child(NodeModel::file_input("Attachment")),
+            )
             .build();
         Self::new(site)
     }
@@ -150,6 +161,7 @@ struct HandleState {
     values: HashMap<(Url, Vec<usize>), String>,
     state_store: StateBundle,
     eval_responses: HashMap<String, Value>,
+    policy: Option<Arc<dyn RequestPolicy>>,
 }
 
 /// 崩溃注入端口：driver 与 handle 共享。
@@ -193,6 +205,7 @@ impl MockHandle {
                 values: HashMap::new(),
                 state_store: StateBundle::default(),
                 eval_responses: HashMap::new(),
+                policy: None,
             }),
             port: Arc::new(CrashPort {
                 crashed: AtomicBool::new(false),
@@ -222,6 +235,31 @@ impl MockHandle {
             Err(AbiError::new(ErrorCode::EngineCrash, "mock engine crashed"))
         } else {
             Ok(())
+        }
+    }
+
+    /// 文档请求询问策略；拒 → 发事件并返回 E_NET_BLOCKED，页面状态不变。
+    fn check_policy(&self, url: &Url) -> HalResult<()> {
+        let Some(policy) = self.lock().policy.clone() else {
+            return Ok(());
+        };
+        let summary = NetRequestSummary {
+            url: url.to_string(),
+            method: "GET".into(),
+            resource_type: "document".into(),
+        };
+        let allowed = policy.decide(&summary).allowed();
+        let _ = self
+            .port
+            .events
+            .send(EngineEvent::NetRequest { summary, allowed });
+        if allowed {
+            Ok(())
+        } else {
+            Err(AbiError::new(
+                ErrorCode::NetBlocked,
+                format!("request to {url} blocked by policy"),
+            ))
         }
     }
 
@@ -273,6 +311,7 @@ impl MockHandle {
 impl EngineHandle for MockHandle {
     async fn navigate(&self, url: &Url) -> HalResult<NavResult> {
         self.ensure_alive()?;
+        self.check_policy(url)?;
         Ok(self.navigate_internal(url))
     }
 
@@ -293,6 +332,8 @@ impl EngineHandle for MockHandle {
 
     async fn reload(&self) -> HalResult<NavResult> {
         self.ensure_alive()?;
+        let current = self.lock().current.clone();
+        self.check_policy(&current)?;
         let (url, page) = {
             let mut st = self.lock();
             st.ref_paths.clear();
@@ -379,6 +420,7 @@ impl EngineHandle for MockHandle {
                         let url = current.join(dest).map_err(|e| {
                             AbiError::new(ErrorCode::Internal, format!("bad on_click url: {e}"))
                         })?;
+                        self.check_policy(&url)?;
                         self.navigate_internal(&url);
                         Ok(ActResult { nav_occurred: true })
                     }
@@ -392,6 +434,65 @@ impl EngineHandle for MockHandle {
                 let mut st = self.lock();
                 let key = (st.current.clone(), path);
                 st.values.entry(key).or_default().push_str(text);
+                Ok(ActResult {
+                    nav_occurred: false,
+                })
+            }
+            InputAction::Select { target, values } => {
+                let path = resolve(target)?;
+                let (page, current) = {
+                    let st = self.lock();
+                    (self.site.resolve(&st.current), st.current.clone())
+                };
+                let node = page
+                    .node_at(&path)
+                    .ok_or_else(|| AbiError::new(ErrorCode::Internal, "ref path out of tree"))?;
+                if node.role != "combobox" {
+                    return Err(AbiError::new(
+                        ErrorCode::InvalidArg,
+                        format!("select target must be combobox, got {}", node.role),
+                    ));
+                }
+                let [value] = values.as_slice() else {
+                    return Err(AbiError::new(
+                        ErrorCode::InvalidArg,
+                        "single-select requires exactly one value",
+                    ));
+                };
+                if !node.options.contains(value) {
+                    return Err(AbiError::new(
+                        ErrorCode::InvalidArg,
+                        format!("no option {value:?}"),
+                    ));
+                }
+                self.lock().values.insert((current, path), value.clone());
+                Ok(ActResult {
+                    nav_occurred: false,
+                })
+            }
+            InputAction::Upload { target, paths } => {
+                let path = resolve(target)?;
+                let (page, current) = {
+                    let st = self.lock();
+                    (self.site.resolve(&st.current), st.current.clone())
+                };
+                let node = page
+                    .node_at(&path)
+                    .ok_or_else(|| AbiError::new(ErrorCode::Internal, "ref path out of tree"))?;
+                if node.role != "fileinput" {
+                    return Err(AbiError::new(
+                        ErrorCode::InvalidArg,
+                        format!("upload target must be fileinput, got {}", node.role),
+                    ));
+                }
+                if paths.is_empty() {
+                    return Err(AbiError::new(ErrorCode::InvalidArg, "no files given"));
+                }
+                let names: Vec<String> = paths
+                    .iter()
+                    .map(|p| p.file_name().unwrap_or_default().to_string_lossy().into())
+                    .collect();
+                self.lock().values.insert((current, path), names.join(","));
                 Ok(ActResult {
                     nav_occurred: false,
                 })
@@ -430,6 +531,18 @@ impl EngineHandle for MockHandle {
         }
         let mut st = self.lock();
         st.state_store.entries.extend(bundle.entries.clone());
+        Ok(())
+    }
+
+    async fn set_request_policy(&self, policy: Option<Arc<dyn RequestPolicy>>) -> HalResult<()> {
+        self.ensure_alive()?;
+        if !self.caps.net_rules {
+            return Err(AbiError::new(
+                ErrorCode::Unsupported,
+                "net rules not supported",
+            ));
+        }
+        self.lock().policy = policy;
         Ok(())
     }
 

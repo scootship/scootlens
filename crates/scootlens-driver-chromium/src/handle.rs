@@ -11,7 +11,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use scootlens_abi::{AbiError, ErrorCode};
 use scootlens_hal::{
     A11ySnapshot, ActResult, EngineEvent, EngineHandle, EngineMetrics, HalResult, HistoryDir,
-    InputAction, NavResult, SnapshotOpts, StateBundle,
+    InputAction, NavResult, RequestPolicy, SnapshotOpts, StateBundle,
 };
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -386,6 +386,72 @@ impl EngineHandle for ChromiumHandle {
                     nav_occurred: false,
                 })
             }
+            InputAction::Select { target, values } => {
+                let backend = self.resolve_ref(target)?;
+                let obj = self
+                    .call("DOM.resolveNode", json!({ "backendNodeId": backend }))
+                    .await?;
+                let object_id = obj
+                    .pointer("/object/objectId")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| AbiError::new(ErrorCode::Internal, "no objectId"))?;
+                let decl = r#"function(vals) {
+                    if (this.tagName !== 'SELECT') throw new Error('target is not a <select>');
+                    if (!this.multiple && vals.length !== 1) throw new Error('single-select requires exactly one value');
+                    const want = Array.from(new Set(vals));
+                    const opts = Array.from(this.options);
+                    const matches = (o, w) => o.value === w || o.textContent.trim() === w;
+                    for (const w of want) {
+                        if (!opts.some((o) => matches(o, w))) throw new Error('no matching option: ' + w);
+                    }
+                    if (this.multiple) {
+                        for (const o of opts) o.selected = want.some((w) => matches(o, w));
+                    } else {
+                        this.value = opts.find((o) => matches(o, want[0])).value;
+                    }
+                    this.dispatchEvent(new Event('input', { bubbles: true }));
+                    this.dispatchEvent(new Event('change', { bubbles: true }));
+                }"#;
+                let r = self
+                    .call(
+                        "Runtime.callFunctionOn",
+                        json!({
+                            "objectId": object_id,
+                            "functionDeclaration": decl,
+                            "arguments": [{ "value": values }],
+                        }),
+                    )
+                    .await?;
+                if let Some(ex) = r.get("exceptionDetails") {
+                    let text = ex
+                        .pointer("/exception/description")
+                        .or_else(|| ex.get("text"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("select failed");
+                    return Err(AbiError::new(ErrorCode::InvalidArg, text));
+                }
+                Ok(ActResult {
+                    nav_occurred: false,
+                })
+            }
+            InputAction::Upload { target, paths } => {
+                let backend = self.resolve_ref(target)?;
+                let files: Vec<String> = paths
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect();
+                self.call(
+                    "DOM.setFileInputFiles",
+                    json!({ "files": files, "backendNodeId": backend }),
+                )
+                .await
+                .map_err(|e| {
+                    AbiError::new(ErrorCode::InvalidArg, format!("setFileInputFiles: {e}"))
+                })?;
+                Ok(ActResult {
+                    nav_occurred: false,
+                })
+            }
         }
     }
 
@@ -428,6 +494,13 @@ impl EngineHandle for ChromiumHandle {
         Err(AbiError::new(
             ErrorCode::Unsupported,
             "state import lands in P2 (chromium)",
+        ))
+    }
+
+    async fn set_request_policy(&self, _policy: Option<Arc<dyn RequestPolicy>>) -> HalResult<()> {
+        Err(AbiError::new(
+            ErrorCode::Unsupported,
+            "net rules land in a later chromium milestone (Fetch interception)",
         ))
     }
 

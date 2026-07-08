@@ -40,6 +40,8 @@ expression: "method::ALL"
   "cap.list",
   "cap.grant",
   "cap.revoke",
+  "cap.approve",
+  "cap.pending",
   "wf.create",
   "wf.list",
   "wf.run",

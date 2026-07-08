@@ -5,14 +5,25 @@
 //!
 //! 本 crate 零内部依赖（依赖规则见 `docs/02-architecture.md`）。
 
+mod cap;
 mod error;
 mod id;
 pub mod method;
+mod net;
 mod rpc;
+mod scope;
 
+pub use cap::{
+    ApprovalDecision, ApprovalMode, PendingApproval, SENSITIVE_SCOPES, TOKEN_PREFIX, TokenClaims,
+    TokenConstraints, is_sensitive,
+};
 pub use error::{AbiError, ErrorCode, RpcError};
 pub use id::{ElementRef, Pid};
+pub use net::{
+    NetAction, NetDecision, NetDefault, NetHeader, NetRequestSummary, NetRule, NetRuleSet,
+};
 pub use rpc::{RpcId, RpcNotification, RpcOutcome, RpcRequest, RpcResponse, V2};
+pub use scope::{ParseScopeError, Scope, origin_matches};
 
 /// ABI 版本。v0 期间允许破坏性变更（需 ADR）；v1 起向后兼容。
 pub const ABI_VERSION: &str = "0.1.0";

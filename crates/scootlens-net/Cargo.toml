@@ -13,3 +13,4 @@ workspace = true
 
 [dependencies]
 scootlens-abi.workspace = true
+url.workspace = true

@@ -3,38 +3,42 @@
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
+use scootlens_abi::{ApprovalMode, TokenClaims, TokenConstraints};
 use scootlens_driver_mock::MockDriver;
 use scootlens_gateway::{Gateway, GatewayConfig};
 use scootlens_kernel::{Dispatcher, Kernel, KernelConfig};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 
-const TOKEN: &str = "test-token-1";
-
-async fn start() -> String {
+/// 起 gateway，返回 (ws url, 全权令牌)。
+async fn start() -> (String, String) {
     let kernel = Kernel::new(
         Arc::new(MockDriver::standard_fixture()),
         KernelConfig::default(),
     );
-    let gw = Gateway::new(
-        Dispatcher::new(kernel),
-        GatewayConfig {
-            token: TOKEN.into(),
-        },
-    );
+    let mut constraints = TokenConstraints::default();
+    constraints.approval.insert("*".into(), ApprovalMode::Auto);
+    let token = kernel.security().issue(&TokenClaims {
+        subject: "user:test".into(),
+        scopes: vec!["*".parse().expect("scope")],
+        constraints,
+        issued_by: "test".into(),
+        issued_at: 0,
+    });
+    let gw = Gateway::new(Dispatcher::new(kernel), GatewayConfig::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
     let addr = listener.local_addr().expect("addr");
     tokio::spawn(async move { gw.serve(listener).await });
-    format!("ws://{addr}/ws")
+    (format!("ws://{addr}/ws"), token)
 }
 
 type WsClient =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-async fn connect(base: &str) -> WsClient {
-    let (ws, _) = tokio_tungstenite::connect_async(format!("{base}?token={TOKEN}"))
+async fn connect(base: &str, token: &str) -> WsClient {
+    let (ws, _) = tokio_tungstenite::connect_async(format!("{base}?token={token}"))
         .await
         .expect("connect");
     ws
@@ -71,7 +75,7 @@ async fn recv_json(ws: &mut WsClient) -> Value {
 
 #[tokio::test]
 async fn rejects_bad_token() {
-    let base = start().await;
+    let (base, _token) = start().await;
     let err = tokio_tungstenite::connect_async(format!("{base}?token=wrong"))
         .await
         .expect_err("should reject");
@@ -81,14 +85,14 @@ async fn rejects_bad_token() {
 
 #[tokio::test]
 async fn rejects_missing_token() {
-    let base = start().await;
+    let (base, _token) = start().await;
     assert!(tokio_tungstenite::connect_async(base).await.is_err());
 }
 
 #[tokio::test]
 async fn rpc_roundtrip_spawn_and_list() {
-    let base = start().await;
-    let mut ws = connect(&base).await;
+    let (base, token) = start().await;
+    let mut ws = connect(&base, &token).await;
 
     let resp = rpc(&mut ws, 1, "proc.spawn", json!({})).await;
     let pid = resp["result"]["pid"].as_str().expect("pid").to_owned();
@@ -99,8 +103,8 @@ async fn rpc_roundtrip_spawn_and_list() {
 
 #[tokio::test]
 async fn parse_error_returns_32700() {
-    let base = start().await;
-    let mut ws = connect(&base).await;
+    let (base, token) = start().await;
+    let mut ws = connect(&base, &token).await;
     ws.send(Message::Text("{not json".to_string().into()))
         .await
         .expect("send");
@@ -111,8 +115,8 @@ async fn parse_error_returns_32700() {
 
 #[tokio::test]
 async fn subscribe_receives_nav_notifications() {
-    let base = start().await;
-    let mut ws = connect(&base).await;
+    let (base, token) = start().await;
+    let mut ws = connect(&base, &token).await;
 
     let resp = rpc(&mut ws, 1, "proc.spawn", json!({})).await;
     let pid = resp["result"]["pid"].as_str().expect("pid").to_owned();
@@ -155,8 +159,8 @@ async fn recv_notification(ws: &mut WsClient) -> Value {
 
 #[tokio::test]
 async fn topic_filter_excludes_other_topics() {
-    let base = start().await;
-    let mut ws = connect(&base).await;
+    let (base, token) = start().await;
+    let mut ws = connect(&base, &token).await;
 
     // 只订 console：nav 与 proc.lifecycle 都不该推
     rpc(&mut ws, 1, "evt.subscribe", json!({"topics": ["console"]})).await;
@@ -182,8 +186,8 @@ async fn topic_filter_excludes_other_topics() {
 
 #[tokio::test]
 async fn unsubscribe_stops_notifications() {
-    let base = start().await;
-    let mut ws = connect(&base).await;
+    let (base, token) = start().await;
+    let mut ws = connect(&base, &token).await;
 
     let resp = rpc(&mut ws, 1, "proc.spawn", json!({})).await;
     let pid = resp["result"]["pid"].as_str().expect("pid").to_owned();
@@ -216,16 +220,16 @@ async fn unsubscribe_stops_notifications() {
 
 #[tokio::test]
 async fn unknown_sub_id_errors() {
-    let base = start().await;
-    let mut ws = connect(&base).await;
+    let (base, token) = start().await;
+    let mut ws = connect(&base, &token).await;
     let resp = rpc(&mut ws, 1, "evt.unsubscribe", json!({"sub_id": "sub-999"})).await;
     assert_eq!(resp["error"]["data"]["code"], "E_INVALID_ARG");
 }
 
 #[tokio::test]
 async fn pid_filter_scopes_subscription() {
-    let base = start().await;
-    let mut ws = connect(&base).await;
+    let (base, token) = start().await;
+    let mut ws = connect(&base, &token).await;
 
     let resp = rpc(&mut ws, 1, "proc.spawn", json!({})).await;
     let pid_a = resp["result"]["pid"].as_str().expect("pid").to_owned();
@@ -268,8 +272,8 @@ async fn pid_filter_scopes_subscription() {
 
 #[tokio::test]
 async fn kill_roundtrip_over_ws() {
-    let base = start().await;
-    let mut ws = connect(&base).await;
+    let (base, token) = start().await;
+    let mut ws = connect(&base, &token).await;
     let resp = rpc(&mut ws, 1, "proc.spawn", json!({})).await;
     let pid = resp["result"]["pid"].as_str().expect("pid").to_owned();
     let resp = tokio::time::timeout(

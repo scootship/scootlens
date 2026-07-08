@@ -42,7 +42,8 @@ stateDiagram-v2
 | `downloads://<pid>/` | 下载文件（隔离沙箱目录） | ✔ | 内核写 |
 | `vault://` | 密钥库 | **永不**（仅内核内部解引用） | Console/管理员 |
 
-- 后端：SQLite（元数据/journal）+ 文件系统（profile/downloads）+ 平台 keyring 或 age 加密文件（vault）
+- 后端：**P2 为文件系统**——vault（ChaCha20-Poly1305 加密文件 + `0600` 密钥）、downloads/uploads 沙箱目录、cookie/storage 经引擎 `export_state`/`import_state` 桥接；SQLite 元数据与平台 keyring 为后续演进
+- uploads 沙箱：`act.upload` 的路径经 `canonicalize` + 前缀校验限制在 `<state-dir>/uploads/` 内，越界返回 `E_INVALID_ARG`（防目录穿越）
 - **vault 解引用**只发生在驱动注入输入的瞬间，值不落 journal、不落 trace、不回传
 
 ## 4.4 Event Bus
@@ -75,9 +76,11 @@ stateDiagram-v2
 
 | 机制 | 内容 | 存储 |
 |---|---|---|
-| journal | 每次 syscall：主体、作用域、参数摘要、结果、耗时（append-only） | SQLite WAL |
+| journal | 每次 syscall：主体、作用域、参数摘要、结果、耗时（append-only） | **P2 为 JSONL 哈希链**（`<state-dir>/journal.jsonl`，每行 `{seq,prev,hash,raw}`，`hash=sha256(prev+raw)`）；SQLite WAL 为 P3 |
 | trace | tracing span：gateway→security→kernel→driver 全链路 | OTLP 导出可选 |
 | replay（P4） | syscall 序列 + screencast 帧 + 事件流，按 `seq` 对齐 | 回放包（zip） |
+
+- journal 三类记录点：`Call`（入口，参数已脱敏）、`Result`（成功，返回已消毒）、`Deny`（拒绝，含错误码）；哈希链可离线校验，任一行被篡改则重放验链失败
 
 - 敏感值（vault、cookie 值）一律脱敏后入 journal
 - `sys.info` 暴露配额水位与引擎健康，Console 仪表盘直接消费

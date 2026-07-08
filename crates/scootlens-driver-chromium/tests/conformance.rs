@@ -42,3 +42,5 @@ conformance_case!(type_updates_value);
 conformance_case!(form_flow_completes);
 conformance_case!(state_roundtrip_or_unsupported);
 conformance_case!(history_and_reload_work);
+conformance_case!(select_updates_value);
+conformance_case!(request_policy_enforced_or_unsupported);

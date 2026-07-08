@@ -3,8 +3,9 @@
 //! TDD 红线：任何 ABI 变更必须先改这里的断言/golden，并附 ADR。
 
 use scootlens_abi::{
-    ABI_VERSION, AbiError, ElementRef, ErrorCode, Pid, RpcId, RpcNotification, RpcRequest,
-    RpcResponse, method,
+    ABI_VERSION, AbiError, ApprovalMode, ElementRef, ErrorCode, NetAction, NetDecision, NetRule,
+    NetRuleSet, Pid, RpcId, RpcNotification, RpcRequest, RpcResponse, Scope, TokenClaims,
+    TokenConstraints, is_sensitive, method, origin_matches,
 };
 use serde_json::json;
 
@@ -135,4 +136,162 @@ fn method_lookup() {
 #[test]
 fn abi_version_is_semver_like() {
     assert_eq!(ABI_VERSION.split('.').count(), 3);
+}
+
+// ---------- 作用域（P2）----------
+
+#[test]
+fn scope_parse_roundtrip() {
+    for s in [
+        "*",
+        "proc:spawn",
+        "act@*.github.com",
+        "state:read:cookies@github.com",
+        "js:exec@localhost:*",
+        "nav@app.test:8080",
+        "cap:admin",
+    ] {
+        let scope: Scope = s.parse().expect(s);
+        assert_eq!(scope.to_string(), s);
+        let js = serde_json::to_value(&scope).expect("ser");
+        assert_eq!(js, json!(s));
+        let back: Scope = serde_json::from_value(js).expect("de");
+        assert_eq!(back, scope);
+    }
+}
+
+#[test]
+fn scope_rejects_malformed() {
+    for bad in [
+        "",
+        "@example.com",
+        "act@",
+        "a b",
+        "act:@x",
+        "act:*",         // `*` 只能是整个作用域
+        "*@example.com", // 超级作用域不带 origin
+        "act@a@b",
+        "ACT@example.com", // 段必须小写
+    ] {
+        assert!(bad.parse::<Scope>().is_err(), "should reject {bad:?}");
+    }
+}
+
+#[test]
+fn scope_covers_matrix() {
+    let cases: &[(&str, &str, Option<&str>, bool)] = &[
+        // (grant, required-segments 以 : 连接, required-origin, 期望)
+        ("*", "js:exec", Some("evil.test"), true),
+        ("act", "act", Some("a.test"), true), // 无 origin 授权 = 任意 origin
+        ("act@*.example.com", "act", Some("app.example.com"), true),
+        ("act@*.example.com", "act", Some("example.com"), false), // 严格子域
+        ("act@example.com", "act", Some("example.com"), true),
+        ("act@example.com", "act", Some("evil.test"), false),
+        ("act@app.test", "nav", Some("app.test"), false), // 域不同
+        ("state:read", "state:read:cookies", Some("github.com"), true), // 前缀覆盖
+        ("state:read:cookies", "state:read", None, false), // 更细不能覆盖更泛
+        (
+            "js:exec@localhost:*",
+            "js:exec",
+            Some("localhost:3000"),
+            true,
+        ),
+        ("js:exec@localhost:*", "js:exec", Some("localhost"), true),
+        (
+            "js:exec@localhost:3000",
+            "js:exec",
+            Some("localhost:8080"),
+            false,
+        ),
+        ("act@app.test", "act", None, false), // 有 origin 的授权不覆盖无 origin 要求
+        ("proc:spawn", "proc:spawn", None, true),
+    ];
+    for (grant, req_body, req_origin, want) in cases {
+        let grant: Scope = grant.parse().expect("grant");
+        let segs: Vec<&str> = req_body.split(':').collect();
+        let required = Scope::required(&segs, *req_origin);
+        assert_eq!(
+            grant.covers(&required),
+            *want,
+            "grant={grant} required={required}"
+        );
+    }
+}
+
+#[test]
+fn origin_pattern_matching() {
+    assert!(origin_matches("*", "anything.test"));
+    assert!(origin_matches("*.github.com", "gist.github.com"));
+    assert!(!origin_matches("*.github.com", "github.com"));
+    assert!(!origin_matches("*.github.com", "evilgithub.com"));
+    assert!(origin_matches("GitHub.com", "github.com")); // host 大小写不敏感
+    assert!(origin_matches("localhost:*", "localhost:9910"));
+    assert!(!origin_matches("localhost:9910", "localhost"));
+}
+
+#[test]
+fn sensitive_scope_set() {
+    for s in [
+        "js:exec@x.test",
+        "state:read:cookies@a.b",
+        "cap:admin",
+        "vault:use",
+    ] {
+        let scope: Scope = s.parse().expect(s);
+        assert!(is_sensitive(&scope), "{s} should be sensitive");
+    }
+    for s in ["nav@a.test", "view@a.test", "proc:spawn", "state:list:proc"] {
+        let scope: Scope = s.parse().expect(s);
+        assert!(!is_sensitive(&scope), "{s} should not be sensitive");
+    }
+}
+
+// ---------- 令牌 claims（P2）----------
+
+#[test]
+fn token_claims_wire_format() {
+    let claims = TokenClaims {
+        subject: "agent:ops-bot-1".into(),
+        scopes: vec![
+            "nav@*.example.com".parse().expect("scope"),
+            "vault:use".parse().expect("scope"),
+        ],
+        constraints: TokenConstraints {
+            expires_at: Some(1_900_000_000),
+            rate: Some("60/min".into()),
+            approval: [("js:exec".to_owned(), ApprovalMode::Manual)].into(),
+        },
+        issued_by: "user:admin".into(),
+        issued_at: 1_800_000_000,
+    };
+    insta::assert_json_snapshot!("token_claims", claims);
+    let v = serde_json::to_value(&claims).expect("ser");
+    let back: TokenClaims = serde_json::from_value(v).expect("de");
+    assert_eq!(back, claims);
+}
+
+// ---------- 网络规则类型（P2）----------
+
+#[test]
+fn net_rule_wire_format() {
+    let rules = NetRuleSet {
+        default: scootlens_abi::NetDefault::Allow,
+        rules: vec![NetRule {
+            action: NetAction::Deny,
+            host: "*.evil.test".into(),
+            methods: vec!["POST".into()],
+            resource_types: vec!["xhr".into()],
+            set_headers: vec![],
+        }],
+    };
+    insta::assert_json_snapshot!("net_rule_set", rules);
+    let v = serde_json::to_value(&rules).expect("ser");
+    let back: NetRuleSet = serde_json::from_value(v).expect("de");
+    assert_eq!(back, rules);
+
+    let d = NetDecision::Allow {
+        set_headers: vec![],
+    };
+    assert!(d.allowed());
+    assert!(!NetDecision::Deny.allowed());
 }

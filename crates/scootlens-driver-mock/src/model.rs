@@ -71,6 +71,8 @@ impl PageModel {
                 name: title.to_owned(),
                 on_click: None,
                 interactive: false,
+                options: vec![],
+                initial_value: None,
                 children: vec![],
             },
         }
@@ -98,6 +100,10 @@ pub struct NodeModel {
     /// 点击后导航目标（相对路径），None 表示点击无导航。
     pub on_click: Option<String>,
     pub interactive: bool,
+    /// combobox 合法选项（其余 role 为空）。
+    pub options: Vec<String>,
+    /// 无输入 overlay 时的初始值。
+    pub initial_value: Option<String>,
     pub children: Vec<NodeModel>,
 }
 
@@ -116,6 +122,8 @@ impl NodeModel {
             name: name.to_owned(),
             on_click: Some(to.to_owned()),
             interactive: true,
+            options: vec![],
+            initial_value: None,
             children: vec![],
         }
     }
@@ -126,6 +134,8 @@ impl NodeModel {
             name: name.to_owned(),
             on_click: to.map(str::to_owned),
             interactive: true,
+            options: vec![],
+            initial_value: None,
             children: vec![],
         }
     }
@@ -136,6 +146,34 @@ impl NodeModel {
             name: name.to_owned(),
             on_click: None,
             interactive: true,
+            options: vec![],
+            initial_value: None,
+            children: vec![],
+        }
+    }
+
+    /// 单选下拉框（`act.select` 目标）。
+    pub fn combobox(name: &str, options: &[&str], initial: &str) -> Self {
+        Self {
+            role: "combobox".into(),
+            name: name.to_owned(),
+            on_click: None,
+            interactive: true,
+            options: options.iter().map(|s| (*s).to_owned()).collect(),
+            initial_value: Some(initial.to_owned()),
+            children: vec![],
+        }
+    }
+
+    /// 文件选择控件（`act.upload` 目标；mock 专用 role）。
+    pub fn file_input(name: &str) -> Self {
+        Self {
+            role: "fileinput".into(),
+            name: name.to_owned(),
+            on_click: None,
+            interactive: true,
+            options: vec![],
+            initial_value: None,
             children: vec![],
         }
     }
@@ -146,6 +184,8 @@ impl NodeModel {
             name: name.to_owned(),
             on_click: None,
             interactive: false,
+            options: vec![],
+            initial_value: None,
             children,
         }
     }
@@ -156,6 +196,8 @@ impl NodeModel {
             name: name.to_owned(),
             on_click: None,
             interactive: false,
+            options: vec![],
+            initial_value: None,
             children: vec![],
         }
     }
@@ -208,7 +250,8 @@ impl RenderCtx<'_> {
         let value = self
             .values
             .get(&(self.page_url.clone(), path.clone()))
-            .cloned();
+            .cloned()
+            .or_else(|| node.initial_value.clone());
 
         let mut children = Vec::new();
         for (i, c) in node.children.iter().enumerate() {

@@ -8,7 +8,7 @@ use axum::extract::ws::{Message, WebSocket};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use scootlens_abi::{AbiError, ErrorCode, Pid, RpcNotification, RpcRequest, RpcResponse, method};
-use scootlens_kernel::{BusEvent, Dispatcher};
+use scootlens_kernel::{BusEvent, Caller, Dispatcher};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -43,7 +43,7 @@ fn lock(subs: &SharedSubs) -> std::sync::MutexGuard<'_, SubTable> {
 }
 
 /// 连接主循环。socket 关闭或出错即退出，所有派生任务随之终止。
-pub(crate) async fn run(socket: WebSocket, dispatcher: Dispatcher) {
+pub(crate) async fn run(socket: WebSocket, dispatcher: Dispatcher, caller: Arc<Caller>) {
     let (sink, stream) = socket.split();
     let (tx, rx) = mpsc::channel::<String>(64);
     let subs: SharedSubs = Arc::default();
@@ -56,7 +56,7 @@ pub(crate) async fn run(socket: WebSocket, dispatcher: Dispatcher) {
         tx.clone(),
     ));
 
-    read_loop(stream, dispatcher, subs, sub_seq, tx).await;
+    read_loop(stream, dispatcher, caller, subs, sub_seq, tx).await;
 
     pusher.abort();
     writer.abort();
@@ -111,6 +111,7 @@ async fn push_loop(
 async fn read_loop(
     mut stream: SplitStream<WebSocket>,
     dispatcher: Dispatcher,
+    caller: Arc<Caller>,
     subs: SharedSubs,
     sub_seq: Arc<AtomicU64>,
     tx: mpsc::Sender<String>,
@@ -146,12 +147,13 @@ async fn read_loop(
                 let resp = handle_unsubscribe(req, &subs);
                 send_response(&tx, &resp).await;
             }
-            // 其余全部并发分发（evt.wait 等慢调用不能阻塞连接）
+            // 其余全部并发分发（evt.wait、审批挂起等慢调用不能阻塞连接）
             _ => {
                 let d = dispatcher.clone();
                 let tx = tx.clone();
+                let caller = Arc::clone(&caller);
                 tokio::spawn(async move {
-                    let resp = d.dispatch(req).await;
+                    let resp = d.dispatch(&caller, req).await;
                     send_response(&tx, &resp).await;
                 });
             }

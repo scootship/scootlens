@@ -1,6 +1,6 @@
 //! 内核事件总线载荷。
 
-use scootlens_abi::Pid;
+use scootlens_abi::{NetRequestSummary, Pid};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -29,6 +29,19 @@ pub enum BusPayload {
     /// `console`：引擎控制台输出。
     #[serde(rename = "console")]
     ConsoleLog { text: String },
+    /// `net.request`：一次网络请求经过策略判定（`net.log` 数据源）。
+    #[serde(rename = "net.request")]
+    NetRequest {
+        summary: NetRequestSummary,
+        allowed: bool,
+    },
+    /// `cap.request`：出现待审批请求（Console 审批收件箱数据源）。
+    #[serde(rename = "cap.request")]
+    CapRequest {
+        approval_id: String,
+        method: String,
+        scope: String,
+    },
 }
 
 impl BusPayload {
@@ -38,6 +51,8 @@ impl BusPayload {
             BusPayload::ProcLifecycle { .. } => "proc.lifecycle",
             BusPayload::Navigated { .. } => "nav",
             BusPayload::ConsoleLog { .. } => "console",
+            BusPayload::NetRequest { .. } => "net.request",
+            BusPayload::CapRequest { .. } => "cap.request",
         }
     }
 }

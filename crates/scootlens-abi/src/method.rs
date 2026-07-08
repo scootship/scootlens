@@ -58,6 +58,8 @@ methods! {
     CAP_LIST = "cap.list";
     CAP_GRANT = "cap.grant";
     CAP_REVOKE = "cap.revoke";
+    CAP_APPROVE = "cap.approve";
+    CAP_PENDING = "cap.pending";
     // wf — 工作流
     WF_CREATE = "wf.create";
     WF_LIST = "wf.list";

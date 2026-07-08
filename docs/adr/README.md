@@ -11,3 +11,4 @@
 | [0004](0004-pure-web-console.md) | 控制台采用纯 Web，不做桌面 GUI | Accepted |
 | [0005](0005-agent-interface-mcp.md) | Agent 接口采用 原生 ABI + MCP 投影双通道 | Accepted |
 | [0006](0006-tdd-mock-driver.md) | 测试策略以 Mock Driver 为基石 | Accepted |
+| [0007](0007-token-wire-format.md) | Capability 令牌 wire 格式采用 `slt1.<claims>.<sig>` | Accepted |

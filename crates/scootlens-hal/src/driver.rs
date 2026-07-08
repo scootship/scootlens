@@ -1,7 +1,10 @@
 //! EngineDriver / EngineHandle trait（docs/05-engine-hal.md）。
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use scootlens_abi::AbiError;
+use scootlens_abi::{NetDecision, NetRequestSummary};
 use serde_json::Value;
 use tokio::sync::broadcast;
 use url::Url;
@@ -13,6 +16,15 @@ use crate::types::{
 
 /// HAL 统一结果类型：错误即 ABI 错误（单一错误分类学）。
 pub type HalResult<T> = Result<T, AbiError>;
+
+/// 请求策略回调：规则引擎属于内核，驱动逐请求询问（强制点在引擎侧）。
+///
+/// 实现必须快速无阻塞（同步判定）。驱动对被拒的**主文档**请求
+/// 返回 `E_NET_BLOCKED`；子资源请求静默失败并发出
+/// [`EngineEvent::NetRequest`] 事件。
+pub trait RequestPolicy: Send + Sync {
+    fn decide(&self, req: &NetRequestSummary) -> NetDecision;
+}
 
 /// 引擎驱动：负责 spawn 引擎实例。
 #[async_trait]
@@ -54,6 +66,11 @@ pub trait EngineHandle: Send + Sync {
     async fn export_state(&self) -> HalResult<StateBundle>;
 
     async fn import_state(&self, bundle: &StateBundle) -> HalResult<()>;
+
+    /// 安装/清除请求策略（None = 放行一切）。
+    ///
+    /// 无 `net_rules` 能力的驱动返回 `E_UNSUPPORTED`。
+    async fn set_request_policy(&self, policy: Option<Arc<dyn RequestPolicy>>) -> HalResult<()>;
 
     /// 引擎事件流（broadcast：订阅后才收到事件）。
     fn events(&self) -> broadcast::Receiver<EngineEvent>;

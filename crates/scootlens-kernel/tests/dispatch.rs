@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use scootlens_abi::{RpcId, RpcOutcome, RpcRequest, RpcResponse};
+use scootlens_abi::{ApprovalMode, RpcId, RpcOutcome, RpcRequest, RpcResponse, TokenConstraints};
 use scootlens_driver_mock::MockDriver;
-use scootlens_kernel::{Dispatcher, Kernel, KernelConfig};
+use scootlens_kernel::{Caller, Dispatcher, Kernel, KernelConfig};
 use serde_json::{Value, json};
 
 fn dispatcher() -> Dispatcher {
@@ -14,8 +14,19 @@ fn dispatcher() -> Dispatcher {
     ))
 }
 
+/// 全权限调用方（P1 行为兼容层：这些测试只测语义，不测鉴权）。
+fn admin() -> Caller {
+    let mut constraints = TokenConstraints::default();
+    constraints.approval.insert("*".into(), ApprovalMode::Auto);
+    Caller {
+        subject: "user:test-admin".into(),
+        scopes: vec!["*".parse().expect("scope")],
+        constraints,
+    }
+}
+
 async fn call(d: &Dispatcher, method: &str, params: Value) -> RpcResponse {
-    d.dispatch(RpcRequest::new(RpcId::Num(1), method, params))
+    d.dispatch(&admin(), RpcRequest::new(RpcId::Num(1), method, params))
         .await
 }
 
@@ -114,8 +125,8 @@ async fn unknown_method_returns_method_not_found() {
 #[tokio::test]
 async fn known_but_unimplemented_returns_unsupported() {
     let d = dispatcher();
-    // state.read 属 P2
-    let resp = call(&d, "state.read", json!({"path": "proc://x/cookies"})).await;
+    // proc.suspend 属 P3
+    let resp = call(&d, "proc.suspend", json!({"pid": "p-1"})).await;
     let (_, code) = error_code(&resp);
     assert_eq!(code, "E_UNSUPPORTED");
 }

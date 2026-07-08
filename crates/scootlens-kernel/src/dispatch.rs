@@ -1,23 +1,33 @@
-//! syscall 分发层：`RpcRequest` → 内核调用 → `RpcResponse`。
+//! syscall 分发层：`RpcRequest` → 鉴权门 → journal → 内核调用 → `RpcResponse`。
 //!
-//! - 参数用 serde 强校验，失败 → `E_INVALID_ARG`
-//! - 方法表内但本阶段未落地 → `E_UNSUPPORTED`
-//! - 方法表外 → JSON-RPC `-32601` Method not found
-//! - `evt.subscribe/unsubscribe` 是连接级语义，由 gateway 处理；进到这里 → `E_UNSUPPORTED`
+//! P2 起每个请求都带已验证的 [`Caller`]，流程（docs/04-kernel-design.md §4.3）：
+//!
+//! 1. 方法表校验（表外 → JSON-RPC `-32601`）
+//! 2. journal 记 `call`（参数已脱敏）——先记后行
+//! 3. 参数解析（serde 强校验，失败 → `E_INVALID_ARG`）
+//! 4. 鉴权：作用域覆盖 → 限速 → 审批（manual → 调用内挂起等待）
+//! 5. 执行；返回值统一出口消毒（vault 值零泄漏）
+//! 6. journal 记 `result` / `deny`
+//!
+//! 方法 → 作用域映射见 docs/06-security-model.md；未落地方法先鉴权后
+//! 返回 `E_UNSUPPORTED`（穷举门禁：无令牌/越权一律 `E_CAP_DENIED`）。
 
 use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use scootlens_abi::{
-    AbiError, ErrorCode, Pid, RpcError, RpcId, RpcOutcome, RpcRequest, RpcResponse, method,
+    AbiError, ApprovalDecision, ErrorCode, NetDefault, NetRule, NetRuleSet, Pid, RpcError, RpcId,
+    RpcOutcome, RpcRequest, RpcResponse, Scope, method,
 };
-use scootlens_hal::{HistoryDir, InputAction, ProfileSpec, SnapshotOpts};
+use scootlens_hal::{A11yNode, HistoryDir, InputAction, ProfileSpec, SnapshotOpts, StateBundle};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::Kernel;
 use crate::bus::BusPayload;
+use crate::journal::JournalKind;
+use crate::security::{AuthzGate, Caller};
+use crate::{Kernel, origin_of};
 
 /// syscall 分发器。廉价 Clone。
 #[derive(Clone)]
@@ -36,70 +46,185 @@ impl Dispatcher {
     }
 
     /// 分发一个请求。任何错误都折叠进 `RpcResponse`，本函数不失败。
-    pub async fn dispatch(&self, req: RpcRequest) -> RpcResponse {
+    pub async fn dispatch(&self, caller: &Caller, req: RpcRequest) -> RpcResponse {
         let id = req.id.clone();
         if !method::is_known(&req.method) {
             return method_not_found(id, &req.method);
         }
-        match self.route(&req.method, req.params).await {
-            Ok(result) => RpcResponse::success(id, result),
-            Err(e) => RpcResponse::failure(id, e),
+        let journal = self.kernel.journal();
+        let redactor = self.kernel.redactor();
+        let pid_str = req
+            .params
+            .get("pid")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+
+        // 预登记：vault 写入的秘密必须在落 journal 前进入脱敏表，
+        // 否则首次写入的明文会随 `call` 记录泄漏（journal 在 route 之前）。
+        if req.method == method::STATE_WRITE
+            && req.params.get("namespace").and_then(Value::as_str) == Some("vault")
+            && let Some(secret) = req.params.get("value").and_then(Value::as_str)
+        {
+            redactor.add(secret);
+        }
+
+        let mut params_summary = req.params.clone();
+        redactor.sanitize(&mut params_summary);
+        journal.record(
+            JournalKind::Call,
+            &caller.subject,
+            &req.method,
+            pid_str.as_deref(),
+            json!({ "params": params_summary }),
+        );
+
+        match self.route(caller, &req.method, req.params).await {
+            Ok(mut result) => {
+                redactor.sanitize(&mut result);
+                journal.record(
+                    JournalKind::Result,
+                    &caller.subject,
+                    &req.method,
+                    pid_str.as_deref(),
+                    json!({ "ok": true }),
+                );
+                RpcResponse::success(id, result)
+            }
+            Err(e) => {
+                let kind = match e.code {
+                    ErrorCode::CapDenied | ErrorCode::Quota | ErrorCode::ApprovalPending => {
+                        JournalKind::Deny
+                    }
+                    _ => JournalKind::Result,
+                };
+                journal.record(
+                    kind,
+                    &caller.subject,
+                    &req.method,
+                    pid_str.as_deref(),
+                    json!({ "ok": false, "code": e.code.as_str() }),
+                );
+                RpcResponse::failure(id, e)
+            }
         }
     }
 
-    async fn route(&self, m: &str, params: Value) -> Result<Value, AbiError> {
+    /// 鉴权门。`manual` 审批 → 发 `cap.request` 事件并调用内挂起等待。
+    async fn authz(&self, caller: &Caller, required: Scope, m: &str) -> Result<(), AbiError> {
+        let gate = self
+            .kernel
+            .security()
+            .check(caller, &required, m, json!({}))?;
+        match gate {
+            AuthzGate::Allowed => Ok(()),
+            AuthzGate::NeedsApproval { pending, rx } => {
+                self.kernel.emit(
+                    None,
+                    BusPayload::CapRequest {
+                        approval_id: pending.id.clone(),
+                        method: m.to_owned(),
+                        scope: pending.scope.to_string(),
+                    },
+                );
+                match tokio::time::timeout(self.kernel.approval_timeout(), rx).await {
+                    Ok(Ok((ApprovalDecision::Allow, _))) => Ok(()),
+                    Ok(Ok((ApprovalDecision::Deny, _))) => Err(AbiError::new(
+                        ErrorCode::CapDenied,
+                        format!("approval {} denied", pending.id),
+                    )),
+                    Ok(Err(_)) => Err(AbiError::new(
+                        ErrorCode::Internal,
+                        "approval channel closed",
+                    )),
+                    Err(_) => Err(AbiError::new(
+                        ErrorCode::ApprovalPending,
+                        format!("approval {} still pending", pending.id),
+                    )),
+                }
+            }
+        }
+    }
+
+    /// 携带当前页 origin 的要求态作用域。
+    fn scope_at(&self, segs: &[&str], pid: &Pid) -> Scope {
+        let origin = self.kernel.current_origin(pid);
+        Scope::required(segs, origin.as_deref())
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn route(&self, caller: &Caller, m: &str, params: Value) -> Result<Value, AbiError> {
         let k = &self.kernel;
         match m {
+            // ---------- proc ----------
             method::PROC_SPAWN => {
                 let p: SpawnParams = parse(params)?;
+                self.authz(caller, Scope::required(&["proc", "spawn"], None), m)
+                    .await?;
                 let profile = ProfileSpec {
                     name: p.profile.unwrap_or_else(|| "default".into()),
+                    download_dir: None,
                 };
                 let pid = k.spawn(profile).await?;
                 Ok(json!({ "pid": pid }))
             }
             method::PROC_LIST => {
                 let _: Empty = parse(params)?;
+                self.authz(caller, Scope::required(&["proc", "list"], None), m)
+                    .await?;
                 Ok(json!({ "procs": k.list().await }))
             }
             method::PROC_INFO => {
                 let p: PidParams = parse(params)?;
+                self.authz(caller, Scope::required(&["proc", "list"], None), m)
+                    .await?;
                 Ok(to_value(k.info(&parse_pid(&p.pid)?).await?))
             }
             method::PROC_KILL => {
                 let p: PidParams = parse(params)?;
+                self.authz(caller, Scope::required(&["proc", "kill"], None), m)
+                    .await?;
                 k.kill(&parse_pid(&p.pid)?).await?;
                 Ok(json!({ "ok": true }))
             }
+            // ---------- nav ----------
             method::NAV_GOTO => {
                 let p: GotoParams = parse(params)?;
                 let url = parse_url(&p.url)?;
+                let origin = origin_of(&url);
+                self.authz(caller, Scope::required(&["nav"], origin.as_deref()), m)
+                    .await?;
                 Ok(to_value(k.navigate(&parse_pid(&p.pid)?, &url).await?))
             }
             method::NAV_BACK => {
                 let p: PidParams = parse(params)?;
-                Ok(to_value(
-                    k.history(&parse_pid(&p.pid)?, HistoryDir::Back).await?,
-                ))
+                let pid = parse_pid(&p.pid)?;
+                self.authz(caller, self.scope_at(&["nav"], &pid), m).await?;
+                Ok(to_value(k.history(&pid, HistoryDir::Back).await?))
             }
             method::NAV_FORWARD => {
                 let p: PidParams = parse(params)?;
-                Ok(to_value(
-                    k.history(&parse_pid(&p.pid)?, HistoryDir::Forward).await?,
-                ))
+                let pid = parse_pid(&p.pid)?;
+                self.authz(caller, self.scope_at(&["nav"], &pid), m).await?;
+                Ok(to_value(k.history(&pid, HistoryDir::Forward).await?))
             }
             method::NAV_RELOAD => {
                 let p: PidParams = parse(params)?;
-                Ok(to_value(k.reload(&parse_pid(&p.pid)?).await?))
+                let pid = parse_pid(&p.pid)?;
+                self.authz(caller, self.scope_at(&["nav"], &pid), m).await?;
+                Ok(to_value(k.reload(&pid).await?))
             }
+            // ---------- view / dom ----------
             method::VIEW_SNAPSHOT => {
                 let p: SnapshotParams = parse(params)?;
+                let pid = parse_pid(&p.pid)?;
+                self.authz(caller, self.scope_at(&["view"], &pid), m)
+                    .await?;
                 let opts = SnapshotOpts {
                     max_nodes: p
                         .max_nodes
                         .unwrap_or_else(|| SnapshotOpts::default().max_nodes),
                 };
-                let snap = k.snapshot(&parse_pid(&p.pid)?, &opts).await?;
+                let snap = k.snapshot(&pid, &opts).await?;
                 Ok(json!({
                     "generation": snap.generation,
                     "truncated": snap.truncated,
@@ -108,31 +233,78 @@ impl Dispatcher {
             }
             method::VIEW_SCREENSHOT => {
                 let p: PidParams = parse(params)?;
-                let bytes = k.screenshot(&parse_pid(&p.pid)?).await?;
+                let pid = parse_pid(&p.pid)?;
+                self.authz(caller, self.scope_at(&["view"], &pid), m)
+                    .await?;
+                let bytes = k.screenshot(&pid).await?;
                 Ok(json!({ "format": "png", "data_base64": BASE64.encode(bytes) }))
             }
+            method::DOM_EXTRACT => {
+                let p: ExtractParams = parse(params)?;
+                let pid = parse_pid(&p.pid)?;
+                self.authz(caller, self.scope_at(&["view"], &pid), m)
+                    .await?;
+                let snap = k.snapshot(&pid, &SnapshotOpts::default()).await?;
+                let mut nodes = Vec::new();
+                collect_nodes(&snap.root, p.role.as_deref(), p.name.as_deref(), &mut nodes);
+                nodes.truncate(p.max.unwrap_or(100));
+                Ok(json!({ "generation": snap.generation, "nodes": nodes }))
+            }
+            // ---------- act ----------
             method::ACT_CLICK => {
                 let p: RefParams = parse(params)?;
+                let pid = parse_pid(&p.pid)?;
+                self.authz(caller, self.scope_at(&["act"], &pid), m).await?;
                 let action = InputAction::Click {
                     target: parse_ref(&p.r#ref)?,
                 };
-                Ok(to_value(k.dispatch(&parse_pid(&p.pid)?, &action).await?))
+                Ok(to_value(k.dispatch(&pid, &action).await?))
             }
             method::ACT_TYPE => {
                 let p: TypeParams = parse(params)?;
+                let pid = parse_pid(&p.pid)?;
+                self.authz(caller, self.scope_at(&["act"], &pid), m).await?;
+                let text = match (&p.vault_ref, &p.text) {
+                    (Some(name), text) => {
+                        if text.as_deref().is_some_and(|t| !t.is_empty()) {
+                            return Err(AbiError::new(
+                                ErrorCode::InvalidArg,
+                                "text and vault_ref are mutually exclusive",
+                            ));
+                        }
+                        self.authz(caller, self.scope_at(&["vault", "use"], &pid), m)
+                            .await?;
+                        let secret = k.vfs().vault_resolve(name).ok_or_else(|| {
+                            AbiError::new(ErrorCode::InvalidArg, format!("no vault entry {name:?}"))
+                        })?;
+                        k.redactor().add(&secret);
+                        secret
+                    }
+                    (None, Some(t)) => t.clone(),
+                    (None, None) => {
+                        return Err(AbiError::new(
+                            ErrorCode::InvalidArg,
+                            "either text or vault_ref is required",
+                        ));
+                    }
+                };
                 let action = InputAction::Type {
                     target: parse_ref(&p.r#ref)?,
-                    text: p.text,
+                    text,
                 };
-                Ok(to_value(k.dispatch(&parse_pid(&p.pid)?, &action).await?))
+                Ok(to_value(k.dispatch(&pid, &action).await?))
             }
             method::ACT_PRESS => {
                 let p: PressParams = parse(params)?;
+                let pid = parse_pid(&p.pid)?;
+                self.authz(caller, self.scope_at(&["act"], &pid), m).await?;
                 let action = InputAction::Press { keys: p.keys };
-                Ok(to_value(k.dispatch(&parse_pid(&p.pid)?, &action).await?))
+                Ok(to_value(k.dispatch(&pid, &action).await?))
             }
             method::ACT_SCROLL => {
                 let p: ScrollParams = parse(params)?;
+                let pid = parse_pid(&p.pid)?;
+                self.authz(caller, self.scope_at(&["act"], &pid), m).await?;
                 let target = match &p.r#ref {
                     Some(r) => Some(parse_ref(r)?),
                     None => None,
@@ -142,19 +314,207 @@ impl Dispatcher {
                     dx: p.dx,
                     dy: p.dy,
                 };
-                Ok(to_value(k.dispatch(&parse_pid(&p.pid)?, &action).await?))
+                Ok(to_value(k.dispatch(&pid, &action).await?))
             }
+            method::ACT_SELECT => {
+                let p: SelectParams = parse(params)?;
+                let pid = parse_pid(&p.pid)?;
+                self.authz(caller, self.scope_at(&["act"], &pid), m).await?;
+                let action = InputAction::Select {
+                    target: parse_ref(&p.r#ref)?,
+                    values: p.values,
+                };
+                Ok(to_value(k.dispatch(&pid, &action).await?))
+            }
+            method::ACT_UPLOAD => {
+                let p: UploadParams = parse(params)?;
+                let pid = parse_pid(&p.pid)?;
+                self.authz(caller, self.scope_at(&["act", "upload"], &pid), m)
+                    .await?;
+                let resolved = k.vfs().resolve_upload(&p.path)?;
+                let action = InputAction::Upload {
+                    target: parse_ref(&p.r#ref)?,
+                    paths: vec![resolved],
+                };
+                Ok(to_value(k.dispatch(&pid, &action).await?))
+            }
+            // ---------- js ----------
             method::JS_EXEC => {
                 let p: EvalParams = parse(params)?;
-                let out = k
-                    .eval(&parse_pid(&p.pid)?, &p.script, &p.args.unwrap_or_default())
+                let pid = parse_pid(&p.pid)?;
+                self.authz(caller, self.scope_at(&["js", "exec"], &pid), m)
                     .await?;
+                let out = k.eval(&pid, &p.script, &p.args.unwrap_or_default()).await?;
                 Ok(json!({ "value": out }))
             }
+            // ---------- evt ----------
             method::EVT_WAIT => {
                 let p: WaitParams = parse(params)?;
-                self.wait_event(p).await
+                let pid = parse_pid(&p.pid)?;
+                self.authz(caller, self.scope_at(&["view"], &pid), m)
+                    .await?;
+                self.wait_event(pid, p.cond, p.timeout_ms).await
             }
+            // ---------- state ----------
+            method::STATE_READ => {
+                let p: StateParams = parse(params)?;
+                self.authz(
+                    caller,
+                    Scope::required(&["state", "read", &p.namespace], None),
+                    m,
+                )
+                .await?;
+                self.state_read(&p).await
+            }
+            method::STATE_WRITE => {
+                let p: StateParams = parse(params)?;
+                self.authz(
+                    caller,
+                    Scope::required(&["state", "write", &p.namespace], None),
+                    m,
+                )
+                .await?;
+                self.state_write(&p).await
+            }
+            method::STATE_LIST => {
+                let p: StateParams = parse(params)?;
+                self.authz(
+                    caller,
+                    Scope::required(&["state", "list", &p.namespace], None),
+                    m,
+                )
+                .await?;
+                self.state_list(&p).await
+            }
+            // ---------- net ----------
+            method::NET_RULES_SET => {
+                let p: NetRulesSetParams = parse(params)?;
+                self.authz(caller, Scope::required(&["net", "rules"], None), m)
+                    .await?;
+                let pid = p.pid.as_deref().map(parse_pid).transpose()?;
+                let rules = NetRuleSet {
+                    default: p.default.unwrap_or_default(),
+                    rules: p.rules.unwrap_or_default(),
+                };
+                k.netstack().set_rules(pid.as_ref(), rules);
+                Ok(json!({ "ok": true }))
+            }
+            method::NET_RULES_GET => {
+                let p: NetPidParams = parse(params)?;
+                self.authz(caller, Scope::required(&["net", "rules", "read"], None), m)
+                    .await?;
+                let pid = p.pid.as_deref().map(parse_pid).transpose()?;
+                Ok(json!({ "rules": k.netstack().get_rules(pid.as_ref()) }))
+            }
+            method::NET_LOG => {
+                let p: NetLogParams = parse(params)?;
+                self.authz(caller, Scope::required(&["net", "log"], None), m)
+                    .await?;
+                let pid = p.pid.as_deref().map(parse_pid).transpose()?;
+                let entries = k.netstack().log(pid.as_ref(), p.limit.unwrap_or(100));
+                Ok(json!({ "entries": entries }))
+            }
+            // ---------- cap ----------
+            method::CAP_REQUEST => {
+                let p: CapRequestParams = parse(params)?;
+                let scope: Scope = p
+                    .scope
+                    .parse()
+                    .map_err(|e| AbiError::new(ErrorCode::InvalidArg, format!("{e}")))?;
+                let (pending, _rx) = k.security().begin_approval(
+                    &caller.subject,
+                    scope.clone(),
+                    m,
+                    json!({}),
+                    p.reason,
+                );
+                k.emit(
+                    None,
+                    BusPayload::CapRequest {
+                        approval_id: pending.id.clone(),
+                        method: m.to_owned(),
+                        scope: scope.to_string(),
+                    },
+                );
+                Ok(json!({ "approval_id": pending.id }))
+            }
+            method::CAP_LIST => {
+                let _: Empty = parse(params)?;
+                let scopes: Vec<String> = k
+                    .security()
+                    .effective_scopes(caller)
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect();
+                Ok(json!({ "subject": caller.subject, "scopes": scopes }))
+            }
+            method::CAP_GRANT => {
+                let p: CapGrantParams = parse(params)?;
+                self.authz(caller, Scope::required(&["cap", "admin"], None), m)
+                    .await?;
+                let scope: Scope = p
+                    .scope
+                    .parse()
+                    .map_err(|e| AbiError::new(ErrorCode::InvalidArg, format!("{e}")))?;
+                k.security().grant(&p.subject, scope);
+                Ok(json!({ "ok": true }))
+            }
+            method::CAP_REVOKE => {
+                let p: CapGrantParams = parse(params)?;
+                self.authz(caller, Scope::required(&["cap", "admin"], None), m)
+                    .await?;
+                let scope: Scope = p
+                    .scope
+                    .parse()
+                    .map_err(|e| AbiError::new(ErrorCode::InvalidArg, format!("{e}")))?;
+                k.security().revoke(&p.subject, scope);
+                Ok(json!({ "ok": true }))
+            }
+            method::CAP_APPROVE => {
+                let p: CapApproveParams = parse(params)?;
+                self.authz(caller, Scope::required(&["cap", "admin"], None), m)
+                    .await?;
+                let info = k.security().approve(
+                    &p.approval_id,
+                    p.decision,
+                    p.remember.unwrap_or(false),
+                )?;
+                k.journal().record(
+                    JournalKind::Approval,
+                    &caller.subject,
+                    m,
+                    None,
+                    json!({
+                        "approval_id": p.approval_id,
+                        "decision": to_value(p.decision),
+                        "subject": info.subject,
+                        "scope": info.scope.to_string(),
+                    }),
+                );
+                Ok(json!({ "ok": true, "approval": to_value(info) }))
+            }
+            method::CAP_PENDING => {
+                let _: Empty = parse(params)?;
+                self.authz(caller, Scope::required(&["cap", "admin"], None), m)
+                    .await?;
+                Ok(json!({ "pending": k.security().pending_list() }))
+            }
+            // ---------- obs ----------
+            method::OBS_JOURNAL => {
+                let p: ObsParams = parse(params)?;
+                self.authz(caller, Scope::required(&["obs", "journal"], None), m)
+                    .await?;
+                let entries = k.journal().tail(p.limit.unwrap_or(100), p.pid.as_deref());
+                Ok(json!({ "entries": entries }))
+            }
+            method::OBS_TRACE => {
+                let p: PidParams = parse(params)?;
+                self.authz(caller, Scope::required(&["obs", "trace"], None), m)
+                    .await?;
+                let entries = k.journal().tail(200, Some(&p.pid));
+                Ok(json!({ "pid": p.pid, "entries": entries }))
+            }
+            // ---------- sys ----------
             method::SYS_INFO => {
                 let _: Empty = parse(params)?;
                 Ok(to_value(k.sys_info().await))
@@ -163,17 +523,133 @@ impl Dispatcher {
                 ErrorCode::Unsupported,
                 format!("{m} is connection-scoped; use the gateway session"),
             )),
-            other => Err(AbiError::new(
+            // ---------- 未落地（先鉴权，穷举门禁） ----------
+            other => {
+                if let Some(scope) = fallback_scope(other) {
+                    self.authz(caller, scope, other).await?;
+                }
+                Err(AbiError::new(
+                    ErrorCode::Unsupported,
+                    format!("{other} is not implemented in this phase"),
+                ))
+            }
+        }
+    }
+
+    // ---------- state 实现 ----------
+
+    async fn state_read(&self, p: &StateParams) -> Result<Value, AbiError> {
+        let k = &self.kernel;
+        match p.namespace.as_str() {
+            // vault 对 Agent 永远只写不读
+            "vault" => Err(AbiError::new(
+                ErrorCode::CapDenied,
+                "vault is write-only for agents",
+            )),
+            "downloads" => Err(AbiError::new(
                 ErrorCode::Unsupported,
-                format!("{other} is not implemented in this phase"),
+                "downloads content read lands in P3 (use state.list)",
+            )),
+            ns @ ("cookies" | "storage") => {
+                let pid = require_pid(p)?;
+                let bundle = k.export_state(&pid).await?;
+                let prefix = ns_prefix(ns);
+                match &p.key {
+                    Some(key) => {
+                        let full = format!("{prefix}{key}");
+                        let value = bundle.entries.get(&full).cloned();
+                        Ok(json!({ "value": value }))
+                    }
+                    None => {
+                        let entries: serde_json::Map<String, Value> = bundle
+                            .entries
+                            .iter()
+                            .filter(|(k, _)| k.starts_with(prefix))
+                            .map(|(k, v)| (k[prefix.len()..].to_owned(), v.clone()))
+                            .collect();
+                        Ok(json!({ "entries": entries }))
+                    }
+                }
+            }
+            other => Err(AbiError::new(
+                ErrorCode::InvalidArg,
+                format!("unknown namespace {other:?}"),
             )),
         }
     }
 
-    async fn wait_event(&self, p: WaitParams) -> Result<Value, AbiError> {
-        let pid: Pid = parse_pid(&p.pid)?;
+    async fn state_write(&self, p: &StateParams) -> Result<Value, AbiError> {
+        let k = &self.kernel;
+        let key = p
+            .key
+            .as_deref()
+            .ok_or_else(|| AbiError::new(ErrorCode::InvalidArg, "key is required"))?;
+        let value = p
+            .value
+            .clone()
+            .ok_or_else(|| AbiError::new(ErrorCode::InvalidArg, "value is required"))?;
+        match p.namespace.as_str() {
+            "vault" => {
+                let secret = value.as_str().ok_or_else(|| {
+                    AbiError::new(ErrorCode::InvalidArg, "vault value must be a string")
+                })?;
+                k.vfs().vault_write(key, secret)?;
+                // 写入即登记出口消毒
+                k.redactor().add(secret);
+                Ok(json!({ "ok": true }))
+            }
+            ns @ ("cookies" | "storage") => {
+                let pid = require_pid(p)?;
+                let mut bundle = StateBundle::default();
+                bundle
+                    .entries
+                    .insert(format!("{}{key}", ns_prefix(ns)), value);
+                k.import_state(&pid, &bundle).await?;
+                Ok(json!({ "ok": true }))
+            }
+            "downloads" => Err(AbiError::new(
+                ErrorCode::Unsupported,
+                "downloads namespace is engine-written only",
+            )),
+            other => Err(AbiError::new(
+                ErrorCode::InvalidArg,
+                format!("unknown namespace {other:?}"),
+            )),
+        }
+    }
+
+    async fn state_list(&self, p: &StateParams) -> Result<Value, AbiError> {
+        let k = &self.kernel;
+        match p.namespace.as_str() {
+            "vault" => Ok(json!({ "names": k.vfs().vault_names() })),
+            "downloads" => Ok(json!({ "names": k.vfs().list_files("downloads")? })),
+            ns @ ("cookies" | "storage") => {
+                let pid = require_pid(p)?;
+                let bundle = k.export_state(&pid).await?;
+                let prefix = ns_prefix(ns);
+                let names: Vec<String> = bundle
+                    .entries
+                    .keys()
+                    .filter(|k| k.starts_with(prefix))
+                    .map(|k| k[prefix.len()..].to_owned())
+                    .collect();
+                Ok(json!({ "names": names }))
+            }
+            other => Err(AbiError::new(
+                ErrorCode::InvalidArg,
+                format!("unknown namespace {other:?}"),
+            )),
+        }
+    }
+
+    async fn wait_event(
+        &self,
+        pid: Pid,
+        cond: WaitCond,
+        timeout_ms: u64,
+    ) -> Result<Value, AbiError> {
         let mut rx = self.kernel.subscribe();
-        let deadline = Duration::from_millis(p.timeout_ms);
+        let deadline = Duration::from_millis(timeout_ms);
         let fut = async {
             loop {
                 match rx.recv().await {
@@ -181,7 +657,7 @@ impl Dispatcher {
                         if e.pid.as_ref() != Some(&pid) {
                             continue;
                         }
-                        if p.cond.matches(&e.payload) {
+                        if cond.matches(&e.payload) {
                             return Ok(e);
                         }
                     }
@@ -197,9 +673,59 @@ impl Dispatcher {
             Ok(Err(err)) => Err(err),
             Err(_) => Err(AbiError::new(
                 ErrorCode::Timeout,
-                format!("no matching event within {}ms", p.timeout_ms),
+                format!("no matching event within {timeout_ms}ms"),
             )),
         }
+    }
+}
+
+/// 未落地方法的规划作用域（先鉴权再 `E_UNSUPPORTED`）。
+fn fallback_scope(m: &str) -> Option<Scope> {
+    let segs: &[&str] = match m {
+        method::PROC_SUSPEND
+        | method::PROC_RESUME
+        | method::PROC_SNAPSHOT
+        | method::PROC_RESTORE => &["proc", "manage"],
+        method::STATE_EXPORT => &["state", "export"],
+        method::STATE_IMPORT => &["state", "import"],
+        method::OBS_REPLAY_EXPORT => &["obs", "replay"],
+        method::WF_CREATE | method::WF_LIST | method::WF_RUN | method::WF_CANCEL => &["wf"],
+        _ => return None,
+    };
+    Some(Scope::required(segs, None))
+}
+
+fn ns_prefix(ns: &str) -> &'static str {
+    match ns {
+        "cookies" => "cookie:",
+        _ => "storage:",
+    }
+}
+
+fn require_pid(p: &StateParams) -> Result<Pid, AbiError> {
+    let pid = p.pid.as_deref().ok_or_else(|| {
+        AbiError::new(
+            ErrorCode::InvalidArg,
+            format!("namespace {:?} requires pid", p.namespace),
+        )
+    })?;
+    parse_pid(pid)
+}
+
+/// DFS 收集匹配节点（dom.extract）。
+fn collect_nodes(n: &A11yNode, role: Option<&str>, name: Option<&str>, out: &mut Vec<Value>) {
+    let role_ok = role.is_none_or(|r| n.role == r);
+    let name_ok = name.is_none_or(|q| n.name.contains(q));
+    if role_ok && name_ok {
+        out.push(json!({
+            "role": n.role,
+            "name": n.name,
+            "value": n.value,
+            "ref": n.elem_ref.as_ref().map(std::string::ToString::to_string),
+        }));
+    }
+    for c in &n.children {
+        collect_nodes(c, role, name, out);
     }
 }
 
@@ -231,6 +757,14 @@ struct SnapshotParams {
 }
 
 #[derive(Deserialize)]
+struct ExtractParams {
+    pid: String,
+    role: Option<String>,
+    name: Option<String>,
+    max: Option<usize>,
+}
+
+#[derive(Deserialize)]
 struct RefParams {
     pid: String,
     r#ref: String,
@@ -240,7 +774,11 @@ struct RefParams {
 struct TypeParams {
     pid: String,
     r#ref: String,
-    text: String,
+    #[serde(default)]
+    text: Option<String>,
+    /// `vault://` 注入：值为 vault 条目名；与 text 互斥。
+    #[serde(default)]
+    vault_ref: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -260,6 +798,21 @@ struct ScrollParams {
 }
 
 #[derive(Deserialize)]
+struct SelectParams {
+    pid: String,
+    r#ref: String,
+    values: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct UploadParams {
+    pid: String,
+    r#ref: String,
+    /// `uploads/` 沙箱内的相对路径。
+    path: String,
+}
+
+#[derive(Deserialize)]
 struct EvalParams {
     pid: String,
     script: String,
@@ -271,6 +824,70 @@ struct WaitParams {
     pid: String,
     cond: WaitCond,
     timeout_ms: u64,
+}
+
+#[derive(Deserialize)]
+struct StateParams {
+    #[serde(default)]
+    pid: Option<String>,
+    namespace: String,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    value: Option<Value>,
+}
+
+#[derive(Deserialize)]
+struct NetRulesSetParams {
+    #[serde(default)]
+    pid: Option<String>,
+    #[serde(default)]
+    default: Option<NetDefault>,
+    #[serde(default)]
+    rules: Option<Vec<NetRule>>,
+}
+
+#[derive(Deserialize)]
+struct NetPidParams {
+    #[serde(default)]
+    pid: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct NetLogParams {
+    #[serde(default)]
+    pid: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct CapRequestParams {
+    scope: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CapGrantParams {
+    subject: String,
+    scope: String,
+}
+
+#[derive(Deserialize)]
+struct CapApproveParams {
+    approval_id: String,
+    decision: ApprovalDecision,
+    #[serde(default)]
+    remember: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct ObsParams {
+    #[serde(default)]
+    pid: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 /// evt.wait 条件（P1 最小集）。

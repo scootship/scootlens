@@ -32,7 +32,7 @@ async fn driver_reports_identity_and_caps() {
     assert_eq!(d.id(), "mock");
     let caps = d.capabilities();
     assert!(caps.snapshot && caps.input && caps.state && caps.events);
-    assert!(!caps.net_rules);
+    assert!(caps.net_rules);
 }
 
 #[tokio::test]

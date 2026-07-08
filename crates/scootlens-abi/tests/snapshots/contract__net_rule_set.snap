@@ -1,0 +1,19 @@
+---
+source: crates/scootlens-abi/tests/contract.rs
+expression: rules
+---
+{
+  "default": "allow",
+  "rules": [
+    {
+      "action": "deny",
+      "host": "*.evil.test",
+      "methods": [
+        "POST"
+      ],
+      "resource_types": [
+        "xhr"
+      ]
+    }
+  ]
+}

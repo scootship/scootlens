@@ -1,21 +1,27 @@
 //! HAL 数据类型。
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use scootlens_abi::ElementRef;
+use scootlens_abi::NetRequestSummary;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-/// 进程 profile 规格（P0 最小版：命名 profile，后续扩展配额等）。
+/// 进程 profile 规格。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileSpec {
     pub name: String,
+    /// 下载落盘目录（State VFS `downloads/`）。None = 禁止下载。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_dir: Option<PathBuf>,
 }
 
 impl Default for ProfileSpec {
     fn default() -> Self {
         Self {
             name: "default".into(),
+            download_dir: None,
         }
     }
 }
@@ -137,6 +143,16 @@ pub enum InputAction {
         dx: f64,
         dy: f64,
     },
+    /// 下拉选择：按选项可见文本匹配；多值仅对 multi-select 合法。
+    Select {
+        target: ElementRef,
+        values: Vec<String>,
+    },
+    /// 文件上传：路径由内核解析并校验（沙箱 `downloads/` 内）后传入。
+    Upload {
+        target: ElementRef,
+        paths: Vec<PathBuf>,
+    },
 }
 
 /// 动作结果。
@@ -174,7 +190,16 @@ pub struct EngineMetrics {
 /// 引擎事件（进入内核 Event Bus）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineEvent {
-    Navigated { url: Url },
+    Navigated {
+        url: Url,
+    },
     Crashed,
-    ConsoleLog { text: String },
+    ConsoleLog {
+        text: String,
+    },
+    /// 一次网络请求经过策略判定（`net.log` 数据源）。
+    NetRequest {
+        summary: NetRequestSummary,
+        allowed: bool,
+    },
 }

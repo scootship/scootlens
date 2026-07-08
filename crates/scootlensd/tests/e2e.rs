@@ -11,14 +11,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
+use scootlens_abi::{ApprovalMode, TokenClaims, TokenConstraints};
 use scootlens_driver_chromium::ChromiumDriver;
 use scootlens_gateway::{Gateway, GatewayConfig};
 use scootlens_kernel::{Dispatcher, Kernel, KernelConfig};
 use scootlens_test_support::FixtureSite;
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
-
-const TOKEN: &str = "e2e-token";
 
 struct Stack {
     ws_url: String,
@@ -29,19 +28,23 @@ async fn start_stack() -> Stack {
     let site = FixtureSite::start_default().await.expect("fixture site");
     let driver = ChromiumDriver::discover().expect("chromium binary");
     let kernel = Kernel::new(Arc::new(driver), KernelConfig::default());
-    let gw = Gateway::new(
-        Dispatcher::new(kernel),
-        GatewayConfig {
-            token: TOKEN.into(),
-        },
-    );
+    let mut constraints = TokenConstraints::default();
+    constraints.approval.insert("*".into(), ApprovalMode::Auto);
+    let token = kernel.security().issue(&TokenClaims {
+        subject: "user:e2e".into(),
+        scopes: vec!["*".parse().expect("scope")],
+        constraints,
+        issued_by: "e2e".into(),
+        issued_at: 0,
+    });
+    let gw = Gateway::new(Dispatcher::new(kernel), GatewayConfig::default());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
     let addr = listener.local_addr().expect("addr");
     tokio::spawn(async move { gw.serve(listener).await });
     Stack {
-        ws_url: format!("ws://{addr}/ws?token={TOKEN}"),
+        ws_url: format!("ws://{addr}/ws?token={token}"),
         site,
     }
 }
@@ -257,6 +260,15 @@ async fn performance_budget() {
     ok(&rpc(&mut ws, 5, "proc.kill", json!({"pid": pid})).await);
 
     println!("budget: spawn={spawn_ms}ms snapshot={snapshot_ms}ms act={act_ms}ms");
+    // The coverage job re-runs this ignored test under llvm-cov instrumentation
+    // (via --include-ignored), which systematically inflates wall-clock timings
+    // and makes a hard budget flaky. The budget is enforced for real in the
+    // non-instrumented e2e job; under instrumentation we still exercise every
+    // RPC (for coverage) but skip the timing assertions.
+    if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
+        eprintln!("coverage instrumentation detected; perf budget assertions skipped");
+        return;
+    }
     assert!(spawn_ms < 1500, "spawn {spawn_ms}ms exceeds 1.5s budget");
     assert!(
         snapshot_ms < 300,

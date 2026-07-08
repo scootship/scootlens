@@ -28,6 +28,7 @@ impl FixtureSite {
             .route("/", get(page("index.html")))
             .route("/login", get(page("login.html")))
             .route("/welcome", get(page("welcome.html")))
+            .route("/widgets", get(page("widgets.html")))
             .with_state(root);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
@@ -93,6 +94,7 @@ mod tests {
             ("/", "Go to Login"),
             ("/login", "Sign in"),
             ("/welcome", "<h1>Welcome</h1>"),
+            ("/widgets", "<select id=\"color\">"),
         ] {
             let body = http_get(&site.url(path)).await;
             assert!(body.contains(needle), "{path} missing {needle}: {body}");

@@ -47,3 +47,16 @@ v0 单管理员令牌足够。
 
 - P2：Dashboard + Approvals + Journal（安全闭环所需的最小 Console）
 - P4：Session 实时画面/接管 + Inspector + Replay + Settings 完整版
+
+## P2 实现状态
+
+已落地于 `console/`（Svelte 5 runes + Vite + TS strict）：
+
+- **连接**：首屏输入 Gateway 基址 + `slt1` 令牌 → `RpcClient` 经 `GET /ws?token=…` 握手；
+  连接状态实时显示，`evt.event` 通知触发页面刷新
+- **Dashboard**：`sys.info`（引擎/版本/进程配额水位）+ `proc.list`
+- **Approvals**：`cap.pending` 收件箱卡片（主体/方法/作用域/理由/时间）→ `cap.approve`（批准 / 批准并记忆 / 拒绝）
+- **Journal**：`obs.journal` 审计表（按 pid 过滤、limit 可调），客户端轻量完整性自证（seq 连续性 + hash 存在性；完整链重放走 P4 `obs.replay.export`）
+- **分层与测试**：全部协议/校验逻辑集中在 `src/lib/`（`rpc` / `api` / `format` / `journal`），
+  Vitest 单测覆盖 ≥80%（CI 门禁 #11）；Svelte 组件仅做展示，UI e2e（Playwright）留待 P4
+- **分发**：`npm run build` 产出 `console/dist/`，由 `scootlensd --console-dir console/dist` 静态托管于 `/`（`tower-http` ServeDir）

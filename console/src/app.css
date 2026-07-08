@@ -127,8 +127,13 @@ input.token {
   width: 260px;
 }
 
-input.profile-in {
+.profile-in {
   width: 160px;
+}
+
+.subtabs {
+  margin-left: 0;
+  flex-wrap: wrap;
 }
 
 button.primary {

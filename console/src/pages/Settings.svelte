@@ -1,8 +1,19 @@
 <script lang="ts">
   import type { ConsoleApi } from "../lib/api";
   import { scopeLabel } from "../lib/format";
+  import { buildStateBundle } from "../lib/cookies";
+  import { listProfiles, rememberProfile } from "../lib/profiles";
 
   let { api, pulse }: { api: ConsoleApi; pulse: number } = $props();
+
+  type SubTab = "tokens" | "network" | "vault" | "session";
+  let sub = $state<SubTab>("tokens");
+  const SUBTABS: { id: SubTab; label: string }[] = [
+    { id: "tokens", label: "令牌 / 权限" },
+    { id: "network", label: "网络规则" },
+    { id: "vault", label: "凭据 Vault" },
+    { id: "session", label: "登录会话" },
+  ];
 
   let self = $state<{ subject: string; scopes: string[] } | null>(null);
   let grantSubject = $state("");
@@ -11,8 +22,23 @@
   let vaultSecret = $state("");
   let vaultRef = $state<string | null>(null);
   let netRules = $state("");
+  let importProfile = $state("");
+  let importCookies = $state("");
+  let importStorage = $state("");
+  let knownProfiles = $state<string[]>(listProfiles());
   let notice = $state<string | null>(null);
   let error = $state<string | null>(null);
+
+  // 粘贴即时预览：解析成功则显示条数，失败则显示原因（不阻塞输入）。
+  const importPreview = $derived.by(() => {
+    if (!importCookies.trim()) return null;
+    try {
+      const r = buildStateBundle(importCookies, importStorage);
+      return { ok: true as const, ...r };
+    } catch (e) {
+      return { ok: false as const, message: e instanceof Error ? e.message : String(e) };
+    }
+  });
 
   function message(e: unknown): string {
     return e instanceof Error ? e.message : String(e);
@@ -73,6 +99,29 @@
     }, "全局网络规则已生效");
   }
 
+  function importSession() {
+    const profile = importProfile.trim();
+    if (!profile) {
+      error = "请填写目标 profile 名";
+      return;
+    }
+    if (!importCookies.trim()) {
+      error = "请粘贴 cookie 导出 JSON";
+      return;
+    }
+    act(async () => {
+      const { bundle, cookies, httpOnly, storage } = buildStateBundle(
+        importCookies,
+        importStorage,
+      );
+      await api.stateImport(profile, bundle);
+      knownProfiles = rememberProfile(profile);
+      importCookies = "";
+      importStorage = "";
+      return { cookies, httpOnly, storage };
+    }, `已导入 profile「${importProfile.trim()}」→ 去 Session 页从下拉选此 profile 点「新开会话」，即带登录态并可接管`);
+  }
+
   $effect(() => {
     void pulse;
     load();
@@ -81,6 +130,13 @@
 
 <div class="section-head">
   <h2>Settings</h2>
+  <nav class="tabs subtabs">
+    {#each SUBTABS as t (t.id)}
+      <button class:active={sub === t.id} onclick={() => (sub = t.id)} data-testid="subtab-{t.id}">
+        {t.label}
+      </button>
+    {/each}
+  </nav>
 </div>
 
 {#if error}
@@ -90,53 +146,122 @@
   <div class="notice" data-testid="settings-notice">{notice}</div>
 {/if}
 
-<div class="grid">
-  <div class="card">
-    <h3>本会话令牌</h3>
-    {#if self}
-      <div class="mono">{self.subject}</div>
-      <div style="margin-top:8px; display:flex; flex-wrap:wrap; gap:6px;">
-        {#each self.scopes as s (s)}
-          <span class="tag info mono">{scopeLabel(s)}</span>
-        {/each}
-      </div>
-    {:else}
-      <div class="empty">加载中…</div>
-    {/if}
-  </div>
+{#if sub === "tokens"}
+  <div class="grid">
+    <div class="card">
+      <h3>本会话令牌</h3>
+      {#if self}
+        <div class="mono">{self.subject}</div>
+        <div style="margin-top:8px; display:flex; flex-wrap:wrap; gap:6px;">
+          {#each self.scopes as s (s)}
+            <span class="tag info mono">{scopeLabel(s)}</span>
+          {/each}
+        </div>
+      {:else}
+        <div class="empty">加载中…</div>
+      {/if}
+    </div>
 
-  <div class="card">
-    <h3>令牌管理 <small class="muted">cap.grant / cap.revoke（动态授权）</small></h3>
-    <div style="display:flex; flex-direction:column; gap:8px;">
-      <input placeholder="主体，如 agent:ops-bot-1" bind:value={grantSubject} data-testid="grant-subject" />
-      <input placeholder="作用域，如 nav@*.example.com" bind:value={grantScope} data-testid="grant-scope" />
-      <div class="toolbar">
-        <button class="primary" onclick={grant} data-testid="grant-btn">授予</button>
-        <button class="danger" onclick={revoke} data-testid="revoke-btn">撤销</button>
+    <div class="card">
+      <h3>令牌管理 <small class="muted">cap.grant / cap.revoke（动态授权）</small></h3>
+      <div style="display:flex; flex-direction:column; gap:8px;">
+        <input placeholder="主体，如 agent:ops-bot-1" bind:value={grantSubject} data-testid="grant-subject" />
+        <input placeholder="作用域，如 nav@*.example.com" bind:value={grantScope} data-testid="grant-scope" />
+        <div class="toolbar">
+          <button class="primary" onclick={grant} data-testid="grant-btn">授予</button>
+          <button class="danger" onclick={revoke} data-testid="revoke-btn">撤销</button>
+        </div>
+        <small class="muted">令牌签发在守护进程侧（`scootlensd --issue`）；此处调整已发主体的有效作用域。</small>
       </div>
-      <small class="muted">令牌签发在守护进程侧（`scootlensd --issue`）；此处调整已发主体的有效作用域。</small>
     </div>
   </div>
-
-  <div class="card">
-    <h3>vault 写入 <small class="muted">单向；Agent 经 vault_ref 使用</small></h3>
-    <div style="display:flex; flex-direction:column; gap:8px;">
-      <input placeholder="凭据名，如 gh-password" bind:value={vaultName} data-testid="vault-name" />
-      <input class="token" type="password" placeholder="凭据值（写入后不可读回）" bind:value={vaultSecret} data-testid="vault-secret" />
+{:else if sub === "network"}
+  <div class="grid">
+    <div class="card" style="grid-column: 1 / -1;">
+      <h3>全局网络规则 <small class="muted">net.rules.set（default + rules[]）</small></h3>
+      <textarea rows="10" bind:value={netRules} class="mono" data-testid="net-rules"></textarea>
       <div class="toolbar">
-        <button class="primary" onclick={writeVault} data-testid="vault-write">写入 vault</button>
-        {#if vaultRef}
-          <span class="tag ok mono" data-testid="vault-ref">vault_ref: {vaultRef}</span>
+        <button class="primary" onclick={applyNetRules} data-testid="net-rules-apply">应用</button>
+      </div>
+    </div>
+  </div>
+{:else if sub === "vault"}
+  <div class="grid">
+    <div class="card" style="grid-column: 1 / -1;">
+      <h3>vault 写入 <small class="muted">单向；Agent 经 vault_ref 使用</small></h3>
+      <div style="display:flex; flex-direction:column; gap:8px; max-width:520px;">
+        <input placeholder="凭据名，如 gh-password" bind:value={vaultName} data-testid="vault-name" />
+        <input class="token" type="password" placeholder="凭据值（写入后不可读回）" bind:value={vaultSecret} data-testid="vault-secret" />
+        <div class="toolbar">
+          <button class="primary" onclick={writeVault} data-testid="vault-write">写入 vault</button>
+          {#if vaultRef}
+            <span class="tag ok mono" data-testid="vault-ref">vault_ref: {vaultRef}</span>
+          {/if}
+        </div>
+      </div>
+    </div>
+  </div>
+{:else if sub === "session"}
+  <div class="grid">
+    <div class="card" style="grid-column: 1 / -1;">
+      <h3>导入登录会话 <small class="muted">粘贴 cookie → state.import → profile 复用</small></h3>
+      <p class="muted" style="margin:0 0 8px; font-size:12px; line-height:1.5;">
+        浏览器安全禁止网页读取其它站点的 cookie，所以要先从扩展导出：在你已登录的
+        Chrome 里装 <b>Cookie-Editor</b> → 打开目标站 → 点扩展 → <b>Export</b>（JSON）→ 粘贴到下面。
+        httpOnly 的会话 cookie 只能这样拿到（<code>document.cookie</code> 读不到）。
+        localStorage 可选：控制台跑 <code>JSON.stringify(Object.entries(localStorage))</code> 复制粘贴。
+      </p>
+      <div style="display:flex; flex-direction:column; gap:8px;">
+        <input
+          placeholder="目标 profile 名，如 github"
+          bind:value={importProfile}
+          list="known-profiles"
+          data-testid="import-profile"
+        />
+        {#if knownProfiles.length}
+          <datalist id="known-profiles">
+            {#each knownProfiles as p (p)}
+              <option value={p}></option>
+            {/each}
+          </datalist>
         {/if}
+        <textarea
+          rows="6"
+          class="mono"
+          placeholder="粘贴 Cookie-Editor 导出的 JSON（数组）…"
+          bind:value={importCookies}
+          data-testid="import-cookies"
+        ></textarea>
+        <textarea
+          rows="3"
+          class="mono"
+          placeholder="可选：localStorage JSON（对象或 [[键,值]]）…"
+          bind:value={importStorage}
+          data-testid="import-storage"
+        ></textarea>
+        <div class="toolbar">
+          <button
+            class="primary"
+            onclick={importSession}
+            disabled={!importPreview?.ok}
+            data-testid="import-session"
+          >
+            导入会话
+          </button>
+          {#if importPreview?.ok}
+            <span class="tag ok" data-testid="import-preview">
+              {importPreview.cookies} cookie（httpOnly {importPreview.httpOnly}）
+              {#if importPreview.storage}· {importPreview.storage} storage{/if}
+            </span>
+          {:else if importPreview}
+            <span class="tag danger" data-testid="import-preview">{importPreview.message}</span>
+          {/if}
+        </div>
+        <small class="muted">
+          导入是敏感操作：用 admin 令牌打开的 console 会自动放行；普通令牌则到
+          Approvals 标签点 Allow。之后到 <strong>Session 页</strong>从下拉选此 profile 点「新开会话」，即带登录态并可接管。
+        </small>
       </div>
     </div>
   </div>
-
-  <div class="card">
-    <h3>全局网络规则 <small class="muted">net.rules.set（default + rules[]）</small></h3>
-    <textarea rows="8" bind:value={netRules} class="mono" data-testid="net-rules"></textarea>
-    <div class="toolbar">
-      <button class="primary" onclick={applyNetRules} data-testid="net-rules-apply">应用</button>
-    </div>
-  </div>
-</div>
+{/if}

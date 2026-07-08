@@ -68,21 +68,15 @@ pub fn workspace_fixtures() -> PathBuf {
 
 fn page(
     file: &'static str,
-) -> impl Fn(
-    axum::extract::State<PathBuf>,
-) -> std::pin::Pin<Box<dyn Future<Output = Response> + Send>>
+) -> impl Fn(axum::extract::State<PathBuf>) -> std::pin::Pin<Box<dyn Future<Output = Response> + Send>>
 + Clone {
     move |axum::extract::State(root): axum::extract::State<PathBuf>| {
         Box::pin(async move {
             match tokio::fs::read_to_string(root.join(file)).await {
-                Ok(body) => (
-                    [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                    body,
-                )
-                    .into_response(),
-                Err(e) => {
-                    (StatusCode::NOT_FOUND, format!("{file}: {e}")).into_response()
+                Ok(body) => {
+                    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response()
                 }
+                Err(e) => (StatusCode::NOT_FOUND, format!("{file}: {e}")).into_response(),
             }
         })
     }

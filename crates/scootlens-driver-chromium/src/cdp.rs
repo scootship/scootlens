@@ -106,7 +106,7 @@ impl CdpConn {
             .await
             .map_err(|_| AbiError::new(ErrorCode::EngineCrash, "CDP connection closed"))?;
 
-        let resp = tokio::time::timeout(Duration::from_secs(10), rx)
+        tokio::time::timeout(Duration::from_secs(10), rx)
             .await
             .map_err(|_| {
                 self.pending
@@ -115,8 +115,7 @@ impl CdpConn {
                     .remove(&id);
                 AbiError::new(ErrorCode::Timeout, format!("CDP call timeout: {method}"))
             })?
-            .map_err(|_| AbiError::new(ErrorCode::EngineCrash, "CDP connection closed"))?;
-        resp
+            .map_err(|_| AbiError::new(ErrorCode::EngineCrash, "CDP connection closed"))?
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<CdpEvent> {

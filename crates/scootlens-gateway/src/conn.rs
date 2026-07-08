@@ -7,9 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use scootlens_abi::{
-    AbiError, ErrorCode, Pid, RpcNotification, RpcRequest, RpcResponse, method,
-};
+use scootlens_abi::{AbiError, ErrorCode, Pid, RpcNotification, RpcRequest, RpcResponse, method};
 use scootlens_kernel::{BusEvent, Dispatcher};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -97,10 +95,8 @@ async fn push_loop(
                 .collect()
         };
         for sub_id in hits {
-            let note = RpcNotification::new(
-                "evt.event",
-                json!({ "sub_id": sub_id, "event": event }),
-            );
+            let note =
+                RpcNotification::new("evt.event", json!({ "sub_id": sub_id, "event": event }));
             let frame = match serde_json::to_string(&note) {
                 Ok(f) => f,
                 Err(_) => continue,

@@ -941,6 +941,7 @@ name = "scootlensd"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "futures-util",
  "rand",
  "scootlens-abi",
  "scootlens-driver-chromium",
@@ -948,7 +949,10 @@ dependencies = [
  "scootlens-gateway",
  "scootlens-hal",
  "scootlens-kernel",
+ "scootlens-test-support",
+ "serde_json",
  "tokio",
+ "tokio-tungstenite 0.26.2",
  "tracing",
  "tracing-subscriber",
 ]

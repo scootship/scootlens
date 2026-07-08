@@ -142,8 +142,7 @@ impl Kernel {
             .await
             .map_err(|_| AbiError::new(ErrorCode::Internal, "scheduler closed"))?;
 
-        let handle: Arc<dyn EngineHandle> =
-            Arc::from(self.inner.driver.spawn(&profile).await?);
+        let handle: Arc<dyn EngineHandle> = Arc::from(self.inner.driver.spawn(&profile).await?);
         let pid = self.inner.next_pid();
 
         let supervisor = tokio::spawn(supervise(
@@ -324,11 +323,7 @@ fn not_found(pid: &Pid) -> AbiError {
 }
 
 /// 崩溃监督 + 引擎事件转发：驱动事件流 → 内核总线。
-async fn supervise(
-    inner: Arc<Inner>,
-    pid: Pid,
-    mut events: broadcast::Receiver<EngineEvent>,
-) {
+async fn supervise(inner: Arc<Inner>, pid: Pid, mut events: broadcast::Receiver<EngineEvent>) {
     loop {
         match events.recv().await {
             Ok(EngineEvent::Crashed) => {

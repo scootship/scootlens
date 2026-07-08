@@ -69,12 +69,7 @@ async fn full_login_flow_via_rpc() {
 
     // 填表
     for (r, v) in [(&user_ref, "alice"), (&pass_ref, "s3cret")] {
-        let resp = call(
-            &d,
-            "act.type",
-            json!({"pid": pid, "ref": r, "text": v}),
-        )
-        .await;
+        let resp = call(&d, "act.type", json!({"pid": pid, "ref": r, "text": v})).await;
         assert_eq!(result(&resp)["nav_occurred"], false);
     }
 
@@ -187,7 +182,12 @@ async fn screenshot_returns_base64() {
     let d = dispatcher();
     let resp = call(&d, "proc.spawn", json!({})).await;
     let pid = result(&resp)["pid"].as_str().expect("pid").to_owned();
-    call(&d, "nav.goto", json!({"pid": pid, "url": "http://fixture.test/"})).await;
+    call(
+        &d,
+        "nav.goto",
+        json!({"pid": pid, "url": "http://fixture.test/"}),
+    )
+    .await;
 
     let resp = call(&d, "view.screenshot", json!({"pid": pid})).await;
     let shot = result(&resp);

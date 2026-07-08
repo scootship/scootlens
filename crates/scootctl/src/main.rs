@@ -40,17 +40,32 @@ enum Cmd {
     /// 列出进程。
     Ps,
     /// 进程详情。
-    Info { pid: String },
+    Info {
+        pid: String,
+    },
     /// 终止进程。
-    Kill { pid: String },
+    Kill {
+        pid: String,
+    },
     /// 导航。
-    Goto { pid: String, url: String },
+    Goto {
+        pid: String,
+        url: String,
+    },
     /// 后退 / 前进 / 重载。
-    Back { pid: String },
-    Forward { pid: String },
-    Reload { pid: String },
+    Back {
+        pid: String,
+    },
+    Forward {
+        pid: String,
+    },
+    Reload {
+        pid: String,
+    },
     /// 语义快照（打印紧凑文本）。
-    Snapshot { pid: String },
+    Snapshot {
+        pid: String,
+    },
     /// 截图（PNG 写文件）。
     Screenshot {
         pid: String,
@@ -58,7 +73,10 @@ enum Cmd {
         out: String,
     },
     /// 点击元素。
-    Click { pid: String, r#ref: String },
+    Click {
+        pid: String,
+        r#ref: String,
+    },
     /// 输入文本。
     Type {
         pid: String,
@@ -66,7 +84,10 @@ enum Cmd {
         text: String,
     },
     /// 按键（Enter/Tab/…）。
-    Press { pid: String, keys: String },
+    Press {
+        pid: String,
+        keys: String,
+    },
     /// 系统信息。
     Sysinfo,
 }
@@ -85,9 +106,10 @@ impl Cmd {
             Cmd::Snapshot { pid } => ("view.snapshot", json!({ "pid": pid })),
             Cmd::Screenshot { pid, .. } => ("view.screenshot", json!({ "pid": pid })),
             Cmd::Click { pid, r#ref } => ("act.click", json!({ "pid": pid, "ref": r#ref })),
-            Cmd::Type { pid, r#ref, text } => {
-                ("act.type", json!({ "pid": pid, "ref": r#ref, "text": text }))
-            }
+            Cmd::Type { pid, r#ref, text } => (
+                "act.type",
+                json!({ "pid": pid, "ref": r#ref, "text": text }),
+            ),
             Cmd::Press { pid, keys } => ("act.press", json!({ "pid": pid, "keys": keys })),
             Cmd::Sysinfo => ("sys.info", json!({})),
         }

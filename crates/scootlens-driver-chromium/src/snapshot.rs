@@ -14,15 +14,43 @@ use serde_json::Value;
 
 /// 交互角色：分配 ref。
 const INTERACTIVE: &[&str] = &[
-    "link", "button", "textbox", "searchbox", "checkbox", "radio", "combobox", "menuitem",
-    "tab", "switch", "slider", "spinbutton",
+    "link",
+    "button",
+    "textbox",
+    "searchbox",
+    "checkbox",
+    "radio",
+    "combobox",
+    "menuitem",
+    "tab",
+    "switch",
+    "slider",
+    "spinbutton",
 ];
 
 /// 结构角色：保留但无 ref。
 const STRUCTURAL: &[&str] = &[
-    "document", "heading", "paragraph", "list", "listitem", "image", "navigation", "main",
-    "form", "table", "row", "cell", "text", "label", "banner", "contentinfo", "article",
-    "region", "alert", "dialog", "status",
+    "document",
+    "heading",
+    "paragraph",
+    "list",
+    "listitem",
+    "image",
+    "navigation",
+    "main",
+    "form",
+    "table",
+    "row",
+    "cell",
+    "text",
+    "label",
+    "banner",
+    "contentinfo",
+    "article",
+    "region",
+    "alert",
+    "dialog",
+    "status",
 ];
 
 /// 剪枝转换结果。
@@ -101,7 +129,8 @@ impl Cx<'_> {
 
         let interactive = INTERACTIVE.contains(&role.as_str());
         let structural = STRUCTURAL.contains(&role.as_str());
-        let keep = !ignored && (interactive || (structural && !name.is_empty()) || role == "document");
+        let keep =
+            !ignored && (interactive || (structural && !name.is_empty()) || role == "document");
 
         let mut children = Vec::new();
         if let Some(ids) = raw.get("childIds").and_then(Value::as_array) {

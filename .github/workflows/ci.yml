@@ -38,7 +38,7 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
-  # 门禁 4：覆盖率 ≥ 80%（行覆盖，workspace 级）
+  # 门禁 4：覆盖率 ≥ 80%（行覆盖，workspace 级；含真实引擎测试，二进制薄组装层由 e2e 外部验证）
   coverage:
     name: coverage >= 80%
     runs-on: ubuntu-latest
@@ -51,8 +51,15 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
+      - uses: browser-actions/setup-chrome@v2
+        id: chrome
       - name: cargo llvm-cov
-        run: cargo llvm-cov --workspace --fail-under-lines 80
+        env:
+          SCOOTLENS_CHROMIUM_BIN: ${{ steps.chrome.outputs.chrome-path }}
+        run: >
+          cargo llvm-cov --workspace --fail-under-lines 80
+          --ignore-filename-regex '(scootctl|scootlensd)/src/main\.rs'
+          -- --include-ignored --test-threads=1
 
   # 门禁 5：依赖审计（advisories / licenses / bans / sources）
   deny:
@@ -112,4 +119,21 @@ jobs:
             exit 1
           fi
 
-  # 门禁 8（e2e smoke）与 9（性能基准）自 P1 引入真实引擎后启用。
+  # 门禁 8-9：e2e smoke + 性能预算（真实 Chromium 全栈：conformance + 登录/崩溃/预算）
+  e2e:
+    name: e2e (chromium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: browser-actions/setup-chrome@v2
+        id: chrome
+      - name: chromium conformance (real engine)
+        env:
+          SCOOTLENS_CHROMIUM_BIN: ${{ steps.chrome.outputs.chrome-path }}
+        run: cargo test -p scootlens-driver-chromium --test conformance -- --ignored --test-threads=1
+      - name: e2e acceptance (login / crash / perf budget)
+        env:
+          SCOOTLENS_CHROMIUM_BIN: ${{ steps.chrome.outputs.chrome-path }}
+        run: cargo test -p scootlensd --test e2e -- --ignored --test-threads=1 --nocapture

@@ -25,7 +25,10 @@ impl BrowserProcess {
         let mut child = Command::new(binary)
             .arg("--headless=new")
             .arg("--remote-debugging-port=0")
-            .arg(format!("--user-data-dir={}", user_data_dir.path().display()))
+            .arg(format!(
+                "--user-data-dir={}",
+                user_data_dir.path().display()
+            ))
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
             .arg("--disable-background-networking")
@@ -122,8 +125,5 @@ pub(crate) fn find_binary() -> Option<PathBuf> {
         "/usr/bin/chromium-browser",
         "/snap/bin/chromium",
     ];
-    candidates
-        .iter()
-        .map(PathBuf::from)
-        .find(|p| p.is_file())
+    candidates.iter().map(PathBuf::from).find(|p| p.is_file())
 }

@@ -134,3 +134,9 @@ MCP 层不做任何权限判断——一切由内核 Security Manager 强制。
 2. 更新本规范 + `scootlens-abi` crate（类型与错误码同源）
 3. 先写契约测试（TDD），再实现
 4. `abi_version` 提升，CHANGELOG 记录
+
+## 修订记录
+
+| 日期 | 变更 | 协议表面影响 |
+|---|---|---|
+| P1 | crate 补充 `RpcOutcome`、`V2` re-export（dispatch/gateway 内部使用） | 无（wire 格式与方法表不变） |

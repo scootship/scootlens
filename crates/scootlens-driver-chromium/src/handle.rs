@@ -64,7 +64,12 @@ impl ChromiumHandle {
             .ok_or_else(|| AbiError::new(ErrorCode::Internal, "no sessionId"))?
             .to_owned();
 
-        for domain in ["Page.enable", "Runtime.enable", "DOM.enable", "Accessibility.enable"] {
+        for domain in [
+            "Page.enable",
+            "Runtime.enable",
+            "DOM.enable",
+            "Accessibility.enable",
+        ] {
             conn.call(Some(&session_id), domain, json!({})).await?;
         }
 
@@ -169,14 +174,20 @@ impl ChromiumHandle {
             ));
         }
         table.backend_ids.get(&r.index()).copied().ok_or_else(|| {
-            AbiError::new(ErrorCode::InvalidArg, format!("unknown ref index {}", r.index()))
+            AbiError::new(
+                ErrorCode::InvalidArg,
+                format!("unknown ref index {}", r.index()),
+            )
         })
     }
 
     /// 元素中心视口坐标。
     async fn center_of(&self, backend_id: i64) -> HalResult<(f64, f64)> {
         let v = self
-            .call("DOM.getContentQuads", json!({ "backendNodeId": backend_id }))
+            .call(
+                "DOM.getContentQuads",
+                json!({ "backendNodeId": backend_id }),
+            )
             .await
             .map_err(|e| {
                 AbiError::new(ErrorCode::InvalidArg, format!("element not on page: {e}"))
@@ -240,7 +251,10 @@ impl EngineHandle for ChromiumHandle {
                 format!("navigation failed: {err}"),
             ));
         }
-        if !self.wait_on(&mut rx, "Page.loadEventFired", NAV_TIMEOUT).await {
+        if !self
+            .wait_on(&mut rx, "Page.loadEventFired", NAV_TIMEOUT)
+            .await
+        {
             return Err(AbiError::new(ErrorCode::Timeout, "page load timeout"));
         }
         self.current_page().await
@@ -251,9 +265,7 @@ impl EngineHandle for ChromiumHandle {
     }
 
     async fn history(&self, dir: HistoryDir) -> HalResult<NavResult> {
-        let v = self
-            .call("Page.getNavigationHistory", json!({}))
-            .await?;
+        let v = self.call("Page.getNavigationHistory", json!({})).await?;
         let current = v["currentIndex"].as_i64().unwrap_or(0);
         let entries = v["entries"].as_array().cloned().unwrap_or_default();
         let target = match dir {
@@ -272,14 +284,18 @@ impl EngineHandle for ChromiumHandle {
             json!({ "entryId": entry_id }),
         )
         .await?;
-        self.wait_on(&mut rx, "Page.loadEventFired", NAV_TIMEOUT).await;
+        self.wait_on(&mut rx, "Page.loadEventFired", NAV_TIMEOUT)
+            .await;
         self.current_page().await
     }
 
     async fn reload(&self) -> HalResult<NavResult> {
         let mut rx = self.conn.subscribe();
         self.call("Page.reload", json!({})).await?;
-        if !self.wait_on(&mut rx, "Page.loadEventFired", NAV_TIMEOUT).await {
+        if !self
+            .wait_on(&mut rx, "Page.loadEventFired", NAV_TIMEOUT)
+            .await
+        {
             return Err(AbiError::new(ErrorCode::Timeout, "reload timeout"));
         }
         self.current_page().await
@@ -324,7 +340,9 @@ impl EngineHandle for ChromiumHandle {
                 let (x, y) = self.center_of(backend).await?;
                 let mut rx = self.conn.subscribe();
                 self.click_at(x, y).await?;
-                let nav = self.wait_on(&mut rx, "Page.loadEventFired", NAV_PROBE).await;
+                let nav = self
+                    .wait_on(&mut rx, "Page.loadEventFired", NAV_PROBE)
+                    .await;
                 Ok(ActResult { nav_occurred: nav })
             }
             InputAction::Type { target, text } => {
@@ -334,13 +352,18 @@ impl EngineHandle for ChromiumHandle {
                     .map_err(|e| {
                         AbiError::new(ErrorCode::InvalidArg, format!("cannot focus: {e}"))
                     })?;
-                self.call("Input.insertText", json!({ "text": text })).await?;
-                Ok(ActResult { nav_occurred: false })
+                self.call("Input.insertText", json!({ "text": text }))
+                    .await?;
+                Ok(ActResult {
+                    nav_occurred: false,
+                })
             }
             InputAction::Press { keys } => {
                 let mut rx = self.conn.subscribe();
                 self.press_key(keys).await?;
-                let nav = self.wait_on(&mut rx, "Page.loadEventFired", NAV_PROBE).await;
+                let nav = self
+                    .wait_on(&mut rx, "Page.loadEventFired", NAV_PROBE)
+                    .await;
                 Ok(ActResult { nav_occurred: nav })
             }
             InputAction::Scroll { target, dx, dy } => {
@@ -359,7 +382,9 @@ impl EngineHandle for ChromiumHandle {
                     }),
                 )
                 .await?;
-                Ok(ActResult { nav_occurred: false })
+                Ok(ActResult {
+                    nav_occurred: false,
+                })
             }
         }
     }

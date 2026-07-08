@@ -11,6 +11,7 @@ members = [
     "crates/scootlens-mcp",
     "crates/scootlensd",
     "crates/scootctl",
+    "crates/scootlens-test-support",
 ]
 
 [workspace.package]
@@ -18,7 +19,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
-repository = "https://github.com/jamiesun/ScootLens"
+repository = "https://github.com/scootship/scootlens"
 publish = false
 
 [workspace.dependencies]
@@ -31,15 +32,24 @@ scootlens-driver-chromium = { path = "crates/scootlens-driver-chromium" }
 scootlens-net = { path = "crates/scootlens-net" }
 scootlens-gateway = { path = "crates/scootlens-gateway" }
 scootlens-mcp = { path = "crates/scootlens-mcp" }
+scootlens-test-support = { path = "crates/scootlens-test-support" }
 
 # 三方依赖统一版本
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "fs", "io-util", "process"] }
 async-trait = "0.1"
 url = { version = "2", features = ["serde"] }
 tracing = "0.1"
+base64 = "0.22"
+axum = { version = "0.8", features = ["ws"] }
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = "0.3"
+rand = "0.9"
+tempfile = "3"
+tokio-tungstenite = "0.26"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # 测试
 insta = { version = "1", features = ["json"] }

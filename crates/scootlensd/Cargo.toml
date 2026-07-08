@@ -11,6 +11,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# 把 console/dist 编译进二进制（需先 `cd console && npm run build`）。
+# 运行时 `--console-dir` 仍可覆盖嵌入版本。
+embed-console = ["dep:include_dir", "dep:mime_guess", "dep:axum"]
+
 [dependencies]
 scootlens-gateway.workspace = true
 scootlens-kernel.workspace = true
@@ -20,6 +25,9 @@ scootlens-abi.workspace = true
 scootlens-hal.workspace = true
 clap.workspace = true
 rand.workspace = true
+include_dir = { workspace = true, optional = true }
+mime_guess = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

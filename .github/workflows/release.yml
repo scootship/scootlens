@@ -1,0 +1,400 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # 门禁：tag 版本必须与 Cargo.toml workspace 版本一致
+  # （clap 的 --version 在编译期读取 CARGO_PKG_VERSION，不一致即发布错误版本号）
+  guard:
+    name: Guard tag matches Cargo.toml version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag == workspace version
+        run: |
+          case "$GITHUB_REF_NAME" in
+            v*) ;;
+            *) echo "not a tag build; skipping version guard"; exit 0 ;;
+          esac
+          tag_version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          echo "tag=${tag_version} cargo=${cargo_version}"
+          if [ "$tag_version" != "$cargo_version" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} 与 Cargo.toml [workspace.package] version=${cargo_version} 不一致"
+            exit 1
+          fi
+
+  # Web Console 只构建一次，编译期经 embed-console 特性嵌入各平台的 scootlensd
+  console:
+    name: Build Web Console
+    runs-on: ubuntu-latest
+    needs: guard
+    defaults:
+      run:
+        working-directory: console
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+      - name: npm ci + build
+        run: |
+          npm ci
+          npm run build
+      - name: Upload console dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: console-dist
+          path: console/dist
+
+  build:
+    name: Build ${{ matrix.asset }}
+    runs-on: ${{ matrix.runner }}
+    needs: [guard, console]
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux 为 musl 静态链接（纯 Rust 依赖，无 C 库），macOS 为原生双架构。
+        # Chromium 引擎在运行时发现外部浏览器（SCOOTLENS_CHROMIUM_BIN），不参与链接。
+        include:
+          - asset: linux-amd64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            cross: true
+          - asset: linux-arm64
+            runner: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            cross: true
+          - asset: linux-armv7
+            runner: ubuntu-latest
+            target: armv7-unknown-linux-musleabihf
+            cross: true
+          - asset: macos-amd64
+            runner: macos-latest
+            target: x86_64-apple-darwin
+            cross: false
+          - asset: macos-arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            cross: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.asset }}
+      - uses: taiki-e/install-action@v2
+        if: ${{ matrix.cross }}
+        with:
+          tool: cross
+
+      - name: Download console dist (embedded into scootlensd at compile time)
+        uses: actions/download-artifact@v4
+        with:
+          name: console-dist
+          path: console/dist
+
+      - name: Build release binaries
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} \
+              --features scootlensd/embed-console \
+              -p scootlensd -p scootctl -p scootlens-mcp
+          else
+            cargo build --release --target ${{ matrix.target }} \
+              --features scootlensd/embed-console \
+              -p scootlensd -p scootctl -p scootlens-mcp
+          fi
+
+      - name: Create archive
+        id: package
+        run: |
+          # workflow_dispatch 时 GITHUB_REF_NAME 是分支名，斜杠替换成连字符
+          version="${GITHUB_REF_NAME//\//-}"
+          archive="scootlens-${version}-${{ matrix.asset }}.tar.gz"
+          out="target/${{ matrix.target }}/release"
+
+          mkdir -p dist/scootlens
+          cp "$out/scootlensd" "$out/scootctl" "$out/scootlens-mcp" dist/scootlens/
+          cp README.md LICENSE dist/scootlens/
+
+          tar -C dist -czf "$archive" scootlens
+          shasum -a 256 "$archive" > "$archive.sha256"
+          echo "archive=${archive}" >> "$GITHUB_OUTPUT"
+          echo "checksum=${archive}.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scootlens-${{ matrix.asset }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}
+
+  publish:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: scootlens-*
+          path: dist-artifacts
+
+      - name: Build release notes
+        id: notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 正文来自 CHANGELOG.md 的对应小节；缺失则用 GitHub 自动生成的 notes。
+          # 两种来源都统一落到同一个文件，再追加固定的安装说明 footer。
+          version="${GITHUB_REF_NAME#v}"
+          notes_file="$RUNNER_TEMP/release-notes.md"
+          if [ -f CHANGELOG.md ] && awk -v v="$version" '
+              $0 ~ "^## \\[" v "\\]" { capture = 1; next }
+              capture && (/^## \[/ || /^\[[^][]+\]:/) { exit }
+              capture { print }
+            ' CHANGELOG.md | sed '/./,$!d' | sed -e :a -e '/^\n*$/{$d;N;ba}' > "$notes_file" && [ -s "$notes_file" ]; then
+            echo "Using CHANGELOG.md section for $version" >&2
+          else
+            echo "No CHANGELOG.md entry for $version; using auto-generated notes." >&2
+            gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="$GITHUB_REF_NAME" --jq .body > "$notes_file" || : > "$notes_file"
+          fi
+          printf '\n' >> "$notes_file"
+          cat .github/release-footer.md >> "$notes_file"
+          echo "file=$notes_file" >> "$GITHUB_OUTPUT"
+
+      - name: Create draft release with all assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -t files < <(find dist-artifacts -type f | sort)
+          gh release create "$GITHUB_REF_NAME" "${files[@]}" \
+            --draft \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "${{ steps.notes.outputs.file }}"
+
+      - name: Publish draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+
+  homebrew:
+    name: Update Homebrew tap
+    runs-on: ubuntu-latest
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/')
+    env:
+      # 设置 HOMEBREW_TAP_TOKEN（对 tap 仓库有 push 权限的 PAT）后此 job 才生效，
+      # 否则静默跳过（与 scoot 的可选发布路径一致）。
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      HOMEBREW_TAP_REPO: scootship/homebrew-tap
+    steps:
+      - name: Download release artifacts
+        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: scootlens-*
+          path: dist-artifacts
+
+      - name: Render and push formula
+        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"          # 如 v0.1.0
+          VERSION="${TAG#v}"              # 如 0.1.0
+          base="https://github.com/scootship/scootlens/releases/download/${TAG}"
+
+          # 取对应 .sha256 工件的第一个空白分隔字段
+          sha() {
+            local f
+            f="$(find dist-artifacts -name "$1.sha256" -print -quit)"
+            [ -n "$f" ] || { echo "missing checksum for $1" >&2; exit 1; }
+            awk '{print $1; exit}' "$f"
+          }
+          MAC_ARM_SHA="$(sha "scootlens-${TAG}-macos-arm64.tar.gz")"
+          MAC_AMD_SHA="$(sha "scootlens-${TAG}-macos-amd64.tar.gz")"
+          LINUX_ARM_SHA="$(sha "scootlens-${TAG}-linux-arm64.tar.gz")"
+          LINUX_AMD_SHA="$(sha "scootlens-${TAG}-linux-amd64.tar.gz")"
+
+          git clone --depth 1 \
+            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${HOMEBREW_TAP_REPO}.git" tap
+          mkdir -p tap/Formula
+
+          cat > tap/Formula/scootlens.rb <<EOF
+          class Scootlens < Formula
+            desc "Programmable web runtime for AI agents: kernel daemon, CLI, MCP projection"
+            homepage "https://github.com/scootship/scootlens"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "${base}/scootlens-${TAG}-macos-arm64.tar.gz"
+                sha256 "${MAC_ARM_SHA}"
+              else
+                url "${base}/scootlens-${TAG}-macos-amd64.tar.gz"
+                sha256 "${MAC_AMD_SHA}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "${base}/scootlens-${TAG}-linux-arm64.tar.gz"
+                sha256 "${LINUX_ARM_SHA}"
+              else
+                url "${base}/scootlens-${TAG}-linux-amd64.tar.gz"
+                sha256 "${LINUX_AMD_SHA}"
+              end
+            end
+
+            def install
+              bin.install "scootlensd", "scootctl", "scootlens-mcp"
+            end
+
+            def caveats
+              <<~EOS
+                Start the daemon (prints the admin token on the first line):
+                  scootlensd --engine mock
+
+                The Web Console is embedded in scootlensd and served at / by
+                default; point --console-dir at a custom build to override it.
+
+                The chromium engine attaches to a locally installed Chromium/Chrome
+                (override discovery with SCOOTLENS_CHROMIUM_BIN).
+              EOS
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/scootctl --version")
+            end
+          end
+          EOF
+
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/scootlens.rb
+          if git diff --cached --quiet; then
+            echo "Formula already up to date for ${VERSION}"
+          else
+            git commit -m "scootlens ${VERSION}"
+            git push
+          fi
+
+  apt:
+    name: Publish apt package
+    runs-on: ubuntu-latest
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/')
+    env:
+      # 设置 APT_TAP_TOKEN（对 apt-tap 仓库有 push 权限的 PAT）后此 job 才生效，
+      # 否则静默跳过。本 job 只往共享 apt 仓库的 pool/ 推 .deb——
+      # 索引签名由 apt-tap 自己的 workflow 完成，GPG 私钥不出那个仓库。
+      APT_TAP_TOKEN: ${{ secrets.APT_TAP_TOKEN }}
+      APT_TAP_REPO: scootship/apt-tap
+    steps:
+      - name: Download release artifacts
+        if: ${{ env.APT_TAP_TOKEN != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: scootlens-*
+          path: dist-artifacts
+
+      - name: Build .deb packages and push to apt-tap
+        if: ${{ env.APT_TAP_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"           # 如 v0.1.0
+          VERSION="${TAG#v}"               # 如 0.1.0
+          WORKDIR="$(mktemp -d)"
+
+          git clone --depth 1 \
+            "https://x-access-token:${APT_TAP_TOKEN}@github.com/${APT_TAP_REPO}.git" "$WORKDIR/tap"
+
+          for pair in linux-amd64:amd64 linux-arm64:arm64 linux-armv7:armhf; do
+            asset="${pair%%:*}"
+            deb_arch="${pair##*:}"
+
+            archive="$(find dist-artifacts -name "scootlens-${TAG}-${asset}.tar.gz" -print -quit)"
+            [ -n "$archive" ] || { echo "missing archive for ${asset}" >&2; exit 1; }
+
+            extract_dir="$WORKDIR/extract-${asset}"
+            mkdir -p "$extract_dir"
+            tar -C "$extract_dir" -xzf "$archive"
+
+            pkgdir="$WORKDIR/pkg-${asset}"
+            mkdir -p "$pkgdir/DEBIAN" "$pkgdir/usr/bin" "$pkgdir/usr/share/doc/scootlens"
+            for bin in scootlensd scootctl scootlens-mcp; do
+              install -m 0755 "$extract_dir/scootlens/$bin" "$pkgdir/usr/bin/$bin"
+            done
+            cp "$extract_dir/scootlens/README.md" "$pkgdir/usr/share/doc/scootlens/"
+
+            cat > "$pkgdir/DEBIAN/control" <<EOF
+          Package: scootlens
+          Version: ${VERSION}
+          Section: web
+          Priority: optional
+          Architecture: ${deb_arch}
+          Suggests: chromium
+          Maintainer: Jett Wang <jamiesun.net@gmail.com>
+          Homepage: https://github.com/scootship/scootlens
+          Description: Programmable web runtime for AI agents (kernel, CLI, MCP)
+           ScootLens runs web sessions as OS-style processes behind one JSON-RPC
+           ABI. The kernel enforces capability tokens, scoped permissions, human
+           approval, network egress rules, a credential vault, and a hash-chain
+           audit journal. Ships scootlensd (daemon, with the Web Console embedded
+           and served at /), scootctl (CLI client), and scootlens-mcp (MCP
+           projection). Statically linked (musl); the chromium engine attaches to
+           a locally installed Chromium/Chrome (SCOOTLENS_CHROMIUM_BIN overrides
+           discovery).
+          EOF
+
+            dest="$WORKDIR/tap/pool/main/s/scootlens"
+            mkdir -p "$dest"
+            dpkg-deb --build --root-owner-group "$pkgdir" \
+              "$dest/scootlens_${VERSION}_${deb_arch}.deb"
+          done
+
+          cd "$WORKDIR/tap"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pool/main/s/scootlens
+          if git diff --cached --quiet; then
+            echo "scootlens ${VERSION} .deb packages already up to date"
+            exit 0
+          fi
+          git commit -m "scootlens ${VERSION} (amd64, arm64, armhf)"
+
+          # apt-tap 是多项目共享仓库，push 被拒时 rebase 重试而不是直接失败
+          for attempt in 1 2 3 4 5; do
+            if git push origin main; then
+              echo "pushed on attempt ${attempt}"
+              exit 0
+            fi
+            [ "$attempt" -eq 5 ] && { echo "push failed after 5 attempts" >&2; exit 1; }
+            echo "push rejected (attempt ${attempt}), fetching + rebasing..." >&2
+            sleep $(( attempt * 5 ))
+            git fetch origin main
+            git rebase origin/main
+          done

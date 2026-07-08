@@ -184,6 +184,8 @@ jobs:
         run: |
           npm ci
           npm run build
+      - name: build scootlensd with embedded console
+        run: cargo build -p scootlensd --features embed-console
       - name: install playwright chromium
         working-directory: console
         run: npx playwright install --with-deps chromium

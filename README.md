@@ -34,6 +34,28 @@ flowchart TB
 概念映射一句话版：进程 = Web 会话，系统调用 = 语义化 Web 操作，文件系统 = State VFS（cookie/storage/vault），
 权限 = capability 令牌，驱动 = 浏览器引擎。详见 [docs/02-architecture.md](docs/02-architecture.md)。
 
+## 安装
+
+macOS / Linux（Homebrew）：
+
+```bash
+brew install scootship/tap/scootlens
+```
+
+Debian / Ubuntu（apt，amd64 / arm64 / armhf）：
+
+```bash
+curl -fsSL https://scootship.github.io/apt-tap/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/scootship-apt-tap.gpg
+echo "deb [signed-by=/usr/share/keyrings/scootship-apt-tap.gpg] https://scootship.github.io/apt-tap stable main" | sudo tee /etc/apt/sources.list.d/scootship-apt-tap.list
+sudo apt update
+sudo apt install scootlens
+```
+
+也可从 [Releases](https://github.com/scootship/scootlens/releases) 直接下载各平台的
+`scootlens-<tag>-<平台>.tar.gz`（内含 `scootlensd` / `scootctl` / `scootlens-mcp`
+三个二进制；Linux 版为 musl 静态链接）。发布版 `scootlensd` 内嵌 Web Console，
+启动后直接访问 `/` 即可，`--console-dir` 仍可指向自定义构建覆盖。
+
 ## 快速开始
 
 需要 Rust ≥ 1.85（见 `rust-toolchain.toml`）。想连真实浏览器请准备一个本地 Chromium/Chrome。
@@ -70,6 +92,14 @@ npm run e2e        # Playwright UI e2e（需先 cargo build -p scootlensd 与 np
 Console 完整版包含 Dashboard / **Session（screencast + 人工接管 + 输入注入）** /
 **Inspector** / Approvals / Journal / **Replay（回放包离线验链播放）** / **Settings**。
 浏览器打开 `http://127.0.0.1:9910/?token=<admin token>&connect=1` 即可直连。
+
+也可以把 Console 直接**嵌入二进制**（先 `npm run build`，再带 feature 构建）：
+
+```bash
+cargo build -p scootlensd --features embed-console
+# 生成的 scootlensd 无需 --console-dir，启动即在 / 托管 Console；
+# 显式传 --console-dir 仍可覆盖嵌入版本。
+```
 
 ### MCP 接入（Agent 生态）
 

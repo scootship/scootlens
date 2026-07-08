@@ -1,0 +1,16 @@
+[package]
+name = "scootlens-test-support"
+description = "测试基建：fixtures 静态站点服务器（仅测试/e2e 使用，不进产品依赖图）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+axum.workspace = true
+tokio.workspace = true

@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # 门禁 1-2：格式 + 静态分析
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # 门禁 3：全量测试（含 insta 契约快照，缺失/漂移即失败）
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    env:
+      INSTA_UPDATE: "no"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --workspace
+
+  # 门禁 4：覆盖率 ≥ 80%（行覆盖，workspace 级；含真实引擎测试，二进制薄组装层由 e2e 外部验证）
+  coverage:
+    name: coverage >= 80%
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - uses: browser-actions/setup-chrome@v2
+        id: chrome
+      - name: cargo llvm-cov
+        env:
+          SCOOTLENS_CHROMIUM_BIN: ${{ steps.chrome.outputs.chrome-path }}
+          SCOOTLENS_CHROMIUM_EXTRA_ARGS: "--no-sandbox --disable-dev-shm-usage --disable-gpu"
+        run: >
+          cargo llvm-cov --workspace --fail-under-lines 80
+          --ignore-filename-regex '(scootctl|scootlensd)/src/main\.rs'
+          -- --include-ignored --test-threads=1
+
+  # 门禁 5：依赖审计（advisories / licenses / bans / sources）
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  # 门禁 6：泄密扫描（全历史；gitleaks CLI，org 仓库无需 action license）
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: run gitleaks
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz \
+            | tar -xz gitleaks
+          ./gitleaks git --no-banner --redact .
+
+  # 门禁 7：unsafe 白名单（当前全 workspace forbid；出现 unsafe 必须走 ADR）
+  unsafe-check:
+    name: unsafe audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: forbid(unsafe_code) declared in workspace lints
+        run: grep -q 'unsafe_code = "forbid"' Cargo.toml
+      - name: no unsafe blocks in crates/
+        run: |
+          if grep -rn --include='*.rs' -E '\bunsafe\b' crates/; then
+            echo '::error::unsafe 代码需 ADR 批准并显式豁免（见 docs/08-engineering.md）'
+            exit 1
+          fi
+
+  # 门禁 10：ABI 变更联动（abi crate 或 03-abi-spec.md 改动必须同时出现）
+  abi-adr-sync:
+    name: ABI spec sync
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: check abi crate and spec change together
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          CHANGED=$(git diff --name-only "$BASE"...HEAD)
+          echo "$CHANGED"
+          ABI_CODE=$(echo "$CHANGED" | grep -c '^crates/scootlens-abi/src/' || true)
+          ABI_SPEC=$(echo "$CHANGED" | grep -c '^docs/03-abi-spec.md' || true)
+          if [ "$ABI_CODE" -gt 0 ] && [ "$ABI_SPEC" -eq 0 ]; then
+            echo '::error::修改了 scootlens-abi 实现但未更新 docs/03-abi-spec.md（协议真源联动，见 docs/08-engineering.md 门禁#10）'
+            exit 1
+          fi
+
+  # 门禁 8-9：e2e smoke + 性能预算（真实 Chromium 全栈：conformance + 登录/崩溃/预算）
+  e2e:
+    name: e2e (chromium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: browser-actions/setup-chrome@v2
+        id: chrome
+      - name: chromium conformance (real engine)
+        env:
+          SCOOTLENS_CHROMIUM_BIN: ${{ steps.chrome.outputs.chrome-path }}
+          SCOOTLENS_CHROMIUM_EXTRA_ARGS: "--no-sandbox --disable-dev-shm-usage --disable-gpu"
+        run: cargo test -p scootlens-driver-chromium --test conformance -- --ignored --test-threads=1
+      - name: e2e acceptance (login / crash / perf budget)
+        env:
+          SCOOTLENS_CHROMIUM_BIN: ${{ steps.chrome.outputs.chrome-path }}
+          SCOOTLENS_CHROMIUM_EXTRA_ARGS: "--no-sandbox --disable-dev-shm-usage --disable-gpu"
+        run: cargo test -p scootlensd --test e2e -- --ignored --test-threads=1 --nocapture

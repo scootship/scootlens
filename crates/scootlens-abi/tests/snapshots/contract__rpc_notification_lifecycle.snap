@@ -1,0 +1,12 @@
+---
+source: crates/scootlens-abi/tests/contract.rs
+expression: n
+---
+{
+  "jsonrpc": "2.0",
+  "method": "evt.proc.lifecycle",
+  "params": {
+    "pid": "p-x1",
+    "state": "crashed"
+  }
+}

@@ -1,0 +1,50 @@
+---
+source: crates/scootlens-abi/tests/contract.rs
+expression: table
+---
+[
+  {
+    "rpc": -32001,
+    "str": "E_CAP_DENIED"
+  },
+  {
+    "rpc": -32002,
+    "str": "E_APPROVAL_PENDING"
+  },
+  {
+    "rpc": -32003,
+    "str": "E_PROC_NOT_FOUND"
+  },
+  {
+    "rpc": -32004,
+    "str": "E_REF_STALE"
+  },
+  {
+    "rpc": -32005,
+    "str": "E_TIMEOUT"
+  },
+  {
+    "rpc": -32006,
+    "str": "E_NET_BLOCKED"
+  },
+  {
+    "rpc": -32007,
+    "str": "E_ENGINE_CRASH"
+  },
+  {
+    "rpc": -32008,
+    "str": "E_UNSUPPORTED"
+  },
+  {
+    "rpc": -32602,
+    "str": "E_INVALID_ARG"
+  },
+  {
+    "rpc": -32009,
+    "str": "E_QUOTA"
+  },
+  {
+    "rpc": -32010,
+    "str": "E_INTERNAL"
+  }
+]

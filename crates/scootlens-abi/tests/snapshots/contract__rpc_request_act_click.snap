@@ -1,0 +1,13 @@
+---
+source: crates/scootlens-abi/tests/contract.rs
+expression: req
+---
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "act.click",
+  "params": {
+    "pid": "p-a1b2c3",
+    "ref": "s3e17"
+  }
+}

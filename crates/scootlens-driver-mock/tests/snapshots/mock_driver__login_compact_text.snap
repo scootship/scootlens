@@ -1,0 +1,8 @@
+---
+source: crates/scootlens-driver-mock/tests/mock_driver.rs
+expression: s.to_compact_text()
+---
+- document "Login"
+  - textbox "Username" [s1e0]
+  - textbox "Password" [s1e1]
+  - button "Sign in" [s1e2]

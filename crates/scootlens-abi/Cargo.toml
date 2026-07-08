@@ -1,0 +1,20 @@
+[package]
+name = "scootlens-abi"
+description = "ScootLens ABI：协议真源（类型/错误码/JSON-RPC 封装），零内部依赖"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+insta.workspace = true

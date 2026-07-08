@@ -1,0 +1,11 @@
+---
+source: crates/scootlens-abi/tests/contract.rs
+expression: rpc
+---
+{
+  "code": -32004,
+  "message": "generation 3 expired",
+  "data": {
+    "code": "E_REF_STALE"
+  }
+}

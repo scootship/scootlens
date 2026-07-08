@@ -53,7 +53,7 @@ pub fn host_of(url: &str) -> Option<String> {
 /// 对单个规则集求值。首条命中规则决定；无命中走 `default`。
 pub fn evaluate(set: &NetRuleSet, req: &NetRequestSummary) -> NetDecision {
     let Some(host) = host_of(&req.url) else {
-        // 无 host 的请求（data:/about: 等）不经网络栈放行；恶意 scheme 由导航层拦截
+        // 无 host 的请求（data:/about: 等）不经网络栈放行；不受信 scheme 由导航层拦截
         return NetDecision::Allow {
             set_headers: vec![],
         };
@@ -170,10 +170,10 @@ mod tests {
     fn denylist_blocks_matching_host() {
         let set = NetRuleSet {
             default: NetDefault::Allow,
-            rules: vec![deny("*.evil.test")],
+            rules: vec![deny("*.denied.test")],
         };
         assert_eq!(
-            evaluate(&set, &req("http://x.evil.test/p", "GET", "document")),
+            evaluate(&set, &req("http://x.denied.test/p", "GET", "document")),
             NetDecision::Deny
         );
         assert!(evaluate(&set, &req("http://good.test/", "GET", "document")).allowed());
@@ -333,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn schemeless_or_hostless_urls_bypass() {
+    fn schemeless_or_hostless_urls_skip_net_rules() {
         let set = NetRuleSet {
             default: NetDefault::Deny,
             rules: vec![],

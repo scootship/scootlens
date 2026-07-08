@@ -80,7 +80,7 @@ stateDiagram-v2
 | trace | tracing span：gateway→security→kernel→driver 全链路 | OTLP 导出可选 |
 | replay（P4） | syscall 序列 + screencast 帧 + 事件流，按 `seq` 对齐 | 回放包（zip） |
 
-- journal 三类记录点：`Call`（入口，参数已脱敏）、`Result`（成功，返回已消毒）、`Deny`（拒绝，含错误码）；哈希链可离线校验，任一行被篡改则重放验链失败
+- journal 三类记录点：`Call`（入口，参数已脱敏）、`Result`（成功，返回已消毒）、`Deny`（拒绝，含错误码）；哈希链可离线校验，任一行被修改则重放验链失败
 
 - 敏感值（vault、cookie 值）一律脱敏后入 journal
 - `sys.info` 暴露配额水位与引擎健康，Console 仪表盘直接消费

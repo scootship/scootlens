@@ -181,12 +181,12 @@ fn scope_rejects_malformed() {
 fn scope_covers_matrix() {
     let cases: &[(&str, &str, Option<&str>, bool)] = &[
         // (grant, required-segments 以 : 连接, required-origin, 期望)
-        ("*", "js:exec", Some("evil.test"), true),
+        ("*", "js:exec", Some("any.test"), true),
         ("act", "act", Some("a.test"), true), // 无 origin 授权 = 任意 origin
         ("act@*.example.com", "act", Some("app.example.com"), true),
         ("act@*.example.com", "act", Some("example.com"), false), // 严格子域
         ("act@example.com", "act", Some("example.com"), true),
-        ("act@example.com", "act", Some("evil.test"), false),
+        ("act@example.com", "act", Some("unrelated.test"), false),
         ("act@app.test", "nav", Some("app.test"), false), // 域不同
         ("state:read", "state:read:cookies", Some("github.com"), true), // 前缀覆盖
         ("state:read:cookies", "state:read", None, false), // 更细不能覆盖更泛
@@ -223,7 +223,7 @@ fn origin_pattern_matching() {
     assert!(origin_matches("*", "anything.test"));
     assert!(origin_matches("*.github.com", "gist.github.com"));
     assert!(!origin_matches("*.github.com", "github.com"));
-    assert!(!origin_matches("*.github.com", "evilgithub.com"));
+    assert!(!origin_matches("*.github.com", "notgithub.com"));
     assert!(origin_matches("GitHub.com", "github.com")); // host 大小写不敏感
     assert!(origin_matches("localhost:*", "localhost:9910"));
     assert!(!origin_matches("localhost:9910", "localhost"));
@@ -278,7 +278,7 @@ fn net_rule_wire_format() {
         default: scootlens_abi::NetDefault::Allow,
         rules: vec![NetRule {
             action: NetAction::Deny,
-            host: "*.evil.test".into(),
+            host: "*.denied.test".into(),
             methods: vec!["POST".into()],
             resource_types: vec!["xhr".into()],
             set_headers: vec![],

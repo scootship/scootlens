@@ -7,7 +7,7 @@ expression: rules
   "rules": [
     {
       "action": "deny",
-      "host": "*.evil.test",
+      "host": "*.denied.test",
       "methods": [
         "POST"
       ],

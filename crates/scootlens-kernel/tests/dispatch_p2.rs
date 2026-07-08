@@ -1,6 +1,6 @@
 //! P2 dispatch happy-path coverage: every new syscall exercised end to end
 //! through the mock engine with a real on-disk state dir (vault / uploads /
-//! journal). Denial paths live in `redteam.rs`; this file proves the success
+//! journal). Denial paths live in `enforcement.rs`; this file proves the success
 //! branches (state.* / net.* / cap.* / obs.* / dom.extract / act.select /
 //! act.upload / act.type vault_ref).
 

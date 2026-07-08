@@ -56,7 +56,7 @@ flowchart LR
 
 ## Phase 2 · 安全与状态（3-4 周）
 
-**目标**：capability 全量强制 + State VFS + 网络规则；安全模型可被红队测试验证。
+**目标**：capability 全量强制 + State VFS + 网络规则；安全模型由策略强制（enforcement）测试集逐条验证拒绝路径。
 
 **范围**
 - Security Manager：令牌签发/校验/作用域匹配/限速/过期；🔒 审批流（挂起→审批→恢复）
@@ -67,7 +67,7 @@ flowchart LR
 - Console 最小版：Dashboard + Approvals + Journal（Svelte 骨架 + 门禁接入）
 
 **验收门禁**
-- [ ] 红队测试集通过：T1-T5 每项威胁至少 2 个攻击用例被正确拦截（含 prompt-injection 诱导跨域用例）
+- [ ] 策略强制测试集通过：T1-T5 每类风险至少 2 个拒绝路径用例验证内核正确拦截（含 prompt-injection 诱导跨域用例）
 - [ ] vault 凭据在 journal/trace/snapshot/ABI 返回中零出现（自动扫描断言）
 - [ ] 无令牌/越权作用域的每个 syscall 都返回 `E_CAP_DENIED`（穷举契约测试）
 - [ ] 审批流 e2e：js.exec 挂起 → Console 批准 → 恢复执行

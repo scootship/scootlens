@@ -117,6 +117,60 @@ impl fmt::Display for ElementRef {
     }
 }
 
+/// 进程快照 ID，格式 `snap-<ascii 小写字母/数字>`（内容寻址哈希前缀）。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SnapId(String);
+
+impl SnapId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// `snap-` 之后的内容哈希部分。
+    pub fn suffix(&self) -> &str {
+        self.0
+            .strip_prefix("snap-")
+            .unwrap_or_else(|| unreachable!("SnapId always carries the snap- prefix"))
+    }
+}
+
+impl FromStr for SnapId {
+    type Err = ParseIdError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let body = s.strip_prefix("snap-").ok_or(ParseIdError::SnapId)?;
+        if body.is_empty()
+            || !body
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        {
+            return Err(ParseIdError::SnapId);
+        }
+        Ok(SnapId(s.to_owned()))
+    }
+}
+
+impl TryFrom<String> for SnapId {
+    type Error = ParseIdError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
+    }
+}
+
+impl From<SnapId> for String {
+    fn from(s: SnapId) -> String {
+        s.0
+    }
+}
+
+impl fmt::Display for SnapId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// ID 解析错误。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ParseIdError {
@@ -124,4 +178,6 @@ pub enum ParseIdError {
     Pid,
     #[error("invalid element ref: expected `s<gen>e<index>`")]
     ElementRef,
+    #[error("invalid snap id: expected `snap-<lowercase alnum>`")]
+    SnapId,
 }

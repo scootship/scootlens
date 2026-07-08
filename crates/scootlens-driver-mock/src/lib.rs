@@ -11,7 +11,7 @@
 mod model;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -53,6 +53,7 @@ impl MockDriver {
                 state: true,
                 events: true,
                 metrics: true,
+                lifecycle: true,
             },
             ports: Mutex::new(Vec::new()),
         }
@@ -83,6 +84,21 @@ impl MockDriver {
         match ports.get(index) {
             Some(p) => {
                 p.crash();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 对第 `index` 个 spawn 出的实例注入内存占用指标（配额测试用）。
+    pub fn set_memory_spawned(&self, index: usize, bytes: u64) -> bool {
+        let ports = self
+            .ports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match ports.get(index) {
+            Some(p) => {
+                p.memory_bytes.store(bytes, Ordering::SeqCst);
                 true
             }
             None => false,
@@ -162,11 +178,15 @@ struct HandleState {
     state_store: StateBundle,
     eval_responses: HashMap<String, Value>,
     policy: Option<Arc<dyn RequestPolicy>>,
+    /// 引擎冻结态（set_lifecycle）。
+    frozen: bool,
 }
 
-/// 崩溃注入端口：driver 与 handle 共享。
+/// 崩溃/指标注入端口：driver 与 handle 共享。
 struct CrashPort {
     crashed: AtomicBool,
+    /// 注入的内存占用指标（配额测试）。
+    memory_bytes: AtomicU64,
     events: broadcast::Sender<EngineEvent>,
 }
 
@@ -206,9 +226,11 @@ impl MockHandle {
                 state_store: StateBundle::default(),
                 eval_responses: HashMap::new(),
                 policy: None,
+                frozen: false,
             }),
             port: Arc::new(CrashPort {
                 crashed: AtomicBool::new(false),
+                memory_bytes: AtomicU64::new(42 * 1024 * 1024),
                 events,
             }),
         }
@@ -217,6 +239,16 @@ impl MockHandle {
     /// 故障注入：进入崩溃态，后续调用返回 E_ENGINE_CRASH 并广播 Crashed 事件。
     pub fn inject_crash(&self) {
         self.port.crash();
+    }
+
+    /// 注入内存占用指标（配额测试）。
+    pub fn set_memory_bytes(&self, bytes: u64) {
+        self.port.memory_bytes.store(bytes, Ordering::SeqCst);
+    }
+
+    /// 当前是否处于冻结态（suspend 断言用）。
+    pub fn is_frozen(&self) -> bool {
+        self.lock().frozen
     }
 
     /// 注册 js.exec 脚本响应（未注册脚本返回 Null）。
@@ -546,14 +578,32 @@ impl EngineHandle for MockHandle {
         Ok(())
     }
 
+    async fn set_lifecycle(&self, frozen: bool) -> HalResult<()> {
+        self.ensure_alive()?;
+        if !self.caps.lifecycle {
+            return Err(AbiError::new(
+                ErrorCode::Unsupported,
+                "lifecycle not supported",
+            ));
+        }
+        self.lock().frozen = frozen;
+        Ok(())
+    }
+
     fn events(&self) -> broadcast::Receiver<EngineEvent> {
         self.port.events.subscribe()
     }
 
     async fn metrics(&self) -> HalResult<EngineMetrics> {
         self.ensure_alive()?;
+        if !self.caps.metrics {
+            return Err(AbiError::new(
+                ErrorCode::Unsupported,
+                "metrics not supported",
+            ));
+        }
         Ok(EngineMetrics {
-            memory_bytes: 42 * 1024 * 1024,
+            memory_bytes: self.port.memory_bytes.load(Ordering::SeqCst),
         })
     }
 

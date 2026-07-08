@@ -8,7 +8,7 @@ use axum::extract::ws::{Message, WebSocket};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use scootlens_abi::{AbiError, ErrorCode, Pid, RpcNotification, RpcRequest, RpcResponse, method};
-use scootlens_kernel::{BusEvent, Caller, Dispatcher};
+use scootlens_kernel::{BusEvent, BusReceiver, Caller, Dispatcher};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -71,19 +71,12 @@ async fn write_loop(mut sink: SplitSink<WebSocket, Message>, mut rx: mpsc::Recei
 }
 
 /// 总线事件 → 命中订阅 → `evt.event` 通知帧。
-async fn push_loop(
-    mut bus: tokio::sync::broadcast::Receiver<BusEvent>,
-    subs: SharedSubs,
-    tx: mpsc::Sender<String>,
-) {
+async fn push_loop(mut bus: BusReceiver, subs: SharedSubs, tx: mpsc::Sender<String>) {
     loop {
         let event = match bus.recv().await {
             Ok(e) => e,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!(skipped = n, "ws push lagged; events dropped");
-                continue;
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            // 关键主题永不丢；高频主题的背压丢弃计数在 event.dropped 内随帧下发
+            Err(_) => break,
         };
         let hits: Vec<String> = {
             let table = lock(&subs);

@@ -17,8 +17,8 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use scootlens_abi::{
-    AbiError, ApprovalDecision, ErrorCode, NetDefault, NetRule, NetRuleSet, Pid, RpcError, RpcId,
-    RpcOutcome, RpcRequest, RpcResponse, Scope, method,
+    AbiError, ApprovalDecision, ErrorCode, NetDefault, NetRule, NetRuleSet, Pid, QuotaSpec,
+    RpcError, RpcId, RpcOutcome, RpcRequest, RpcResponse, Scope, SnapId, WfSpec, method,
 };
 use scootlens_hal::{A11yNode, HistoryDir, InputAction, ProfileSpec, SnapshotOpts, StateBundle};
 use serde::Deserialize;
@@ -33,11 +33,20 @@ use crate::{Kernel, origin_of};
 #[derive(Clone)]
 pub struct Dispatcher {
     kernel: Kernel,
+    wf: std::sync::Arc<crate::wf::WfDaemon>,
 }
 
 impl Dispatcher {
     pub fn new(kernel: Kernel) -> Self {
-        Self { kernel }
+        Self::with_wf_clock(kernel, crate::wf::system_clock())
+    }
+
+    /// 注入 workflow 时钟（unix 秒）——cron 触发的确定性测试用。
+    pub fn with_wf_clock(kernel: Kernel, clock: crate::WfClock) -> Self {
+        Self {
+            kernel,
+            wf: std::sync::Arc::new(crate::wf::WfDaemon::new(clock)),
+        }
     }
 
     /// 底层内核（gateway 订阅事件用）。
@@ -160,11 +169,18 @@ impl Dispatcher {
                 let p: SpawnParams = parse(params)?;
                 self.authz(caller, Scope::required(&["proc", "spawn"], None), m)
                     .await?;
+                // 高配额需要额外的 quota:high（docs/04 §4.2）
+                if let Some(q) = &p.quotas
+                    && q.max_memory_bytes > k.quota_high_bytes()
+                {
+                    self.authz(caller, Scope::required(&["quota", "high"], None), m)
+                        .await?;
+                }
                 let profile = ProfileSpec {
                     name: p.profile.unwrap_or_else(|| "default".into()),
                     download_dir: None,
                 };
-                let pid = k.spawn(profile).await?;
+                let pid = k.spawn_with(profile, p.quotas).await?;
                 Ok(json!({ "pid": pid }))
             }
             method::PROC_LIST => {
@@ -185,6 +201,38 @@ impl Dispatcher {
                     .await?;
                 k.kill(&parse_pid(&p.pid)?).await?;
                 Ok(json!({ "ok": true }))
+            }
+            method::PROC_SUSPEND => {
+                let p: PidParams = parse(params)?;
+                self.authz(caller, Scope::required(&["proc", "manage"], None), m)
+                    .await?;
+                k.suspend(&parse_pid(&p.pid)?).await?;
+                Ok(json!({ "ok": true }))
+            }
+            method::PROC_RESUME => {
+                let p: PidParams = parse(params)?;
+                self.authz(caller, Scope::required(&["proc", "manage"], None), m)
+                    .await?;
+                k.resume(&parse_pid(&p.pid)?).await?;
+                Ok(json!({ "ok": true }))
+            }
+            method::PROC_SNAPSHOT => {
+                let p: PidParams = parse(params)?;
+                self.authz(caller, Scope::required(&["proc", "snapshot"], None), m)
+                    .await?;
+                let snap = k.snapshot_proc(&parse_pid(&p.pid)?).await?;
+                Ok(json!({ "snap_id": snap }))
+            }
+            method::PROC_RESTORE => {
+                let p: RestoreParams = parse(params)?;
+                self.authz(caller, Scope::required(&["proc", "spawn"], None), m)
+                    .await?;
+                let snap: SnapId = p
+                    .snap_id
+                    .parse()
+                    .map_err(|e| AbiError::new(ErrorCode::InvalidArg, format!("{e}")))?;
+                let pid = k.restore_proc(&snap, p.engine.as_deref()).await?;
+                Ok(json!({ "pid": pid }))
             }
             // ---------- nav ----------
             method::NAV_GOTO => {
@@ -386,6 +434,20 @@ impl Dispatcher {
                 .await?;
                 self.state_list(&p).await
             }
+            method::STATE_EXPORT => {
+                let p: PidParams = parse(params)?;
+                self.authz(caller, Scope::required(&["state", "export"], None), m)
+                    .await?;
+                let bundle = k.export_state(&parse_pid(&p.pid)?).await?;
+                Ok(json!({ "state": bundle }))
+            }
+            method::STATE_IMPORT => {
+                let p: StateImportParams = parse(params)?;
+                self.authz(caller, Scope::required(&["state", "import"], None), m)
+                    .await?;
+                k.import_profile_state(&p.profile, &p.state)?;
+                Ok(json!({ "ok": true }))
+            }
             // ---------- net ----------
             method::NET_RULES_SET => {
                 let p: NetRulesSetParams = parse(params)?;
@@ -513,6 +575,33 @@ impl Dispatcher {
                     .await?;
                 let entries = k.journal().tail(200, Some(&p.pid));
                 Ok(json!({ "pid": p.pid, "entries": entries }))
+            }
+            // ---------- wf ----------
+            method::WF_CREATE => {
+                let p: WfCreateParams = parse(params)?;
+                self.authz(caller, Scope::required(&["wf", "manage"], None), m)
+                    .await?;
+                self.wf.create(self, caller, p.spec)?;
+                Ok(json!({ "ok": true }))
+            }
+            method::WF_LIST => {
+                let _: Empty = parse(params)?;
+                self.authz(caller, Scope::required(&["wf", "manage"], None), m)
+                    .await?;
+                Ok(self.wf.list())
+            }
+            method::WF_RUN => {
+                let p: WfNameParams = parse(params)?;
+                self.authz(caller, Scope::required(&["wf", "manage"], None), m)
+                    .await?;
+                self.wf.run(self, &p.name).await
+            }
+            method::WF_CANCEL => {
+                let p: WfNameParams = parse(params)?;
+                self.authz(caller, Scope::required(&["wf", "manage"], None), m)
+                    .await?;
+                self.wf.cancel(&p.name)?;
+                Ok(json!({ "ok": true }))
             }
             // ---------- sys ----------
             method::SYS_INFO => {
@@ -661,8 +750,7 @@ impl Dispatcher {
                             return Ok(e);
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    Err(crate::bus::BusRecvError::Closed) => {
                         return Err(AbiError::new(ErrorCode::Internal, "event bus closed"));
                     }
                 }
@@ -682,14 +770,7 @@ impl Dispatcher {
 /// 未落地方法的规划作用域（先鉴权再 `E_UNSUPPORTED`）。
 fn fallback_scope(m: &str) -> Option<Scope> {
     let segs: &[&str] = match m {
-        method::PROC_SUSPEND
-        | method::PROC_RESUME
-        | method::PROC_SNAPSHOT
-        | method::PROC_RESTORE => &["proc", "manage"],
-        method::STATE_EXPORT => &["state", "export"],
-        method::STATE_IMPORT => &["state", "import"],
         method::OBS_REPLAY_EXPORT => &["obs", "replay"],
-        method::WF_CREATE | method::WF_LIST | method::WF_RUN | method::WF_CANCEL => &["wf"],
         _ => return None,
     };
     Some(Scope::required(segs, None))
@@ -737,6 +818,33 @@ struct Empty {}
 #[derive(Deserialize)]
 struct SpawnParams {
     profile: Option<String>,
+    /// 资源配额；高于内核 `quota_high_bytes` 时需 `quota:high`。
+    #[serde(default)]
+    quotas: Option<QuotaSpec>,
+}
+
+#[derive(Deserialize)]
+struct RestoreParams {
+    snap_id: String,
+    #[serde(default)]
+    engine: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct StateImportParams {
+    /// 导入目标是 profile（复用机制），不是运行中的 pid。
+    profile: String,
+    state: StateBundle,
+}
+
+#[derive(Deserialize)]
+struct WfCreateParams {
+    spec: WfSpec,
+}
+
+#[derive(Deserialize)]
+struct WfNameParams {
+    name: String,
 }
 
 #[derive(Deserialize)]

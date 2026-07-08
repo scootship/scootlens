@@ -11,5 +11,10 @@
     <label>Password <input type="password" name="password"></label>
     <button type="submit">Sign in</button>
   </form>
+  <script>
+    // e2e 状态快照往返用：进入登录页即写入会话状态
+    document.cookie = "visited=login; path=/";
+    try { localStorage.setItem("draft_user", "alice"); } catch (_) {}
+  </script>
 </body>
 </html>

@@ -72,6 +72,18 @@ pub trait EngineHandle: Send + Sync {
     /// 无 `net_rules` 能力的驱动返回 `E_UNSUPPORTED`。
     async fn set_request_policy(&self, policy: Option<Arc<dyn RequestPolicy>>) -> HalResult<()>;
 
+    /// 冻结/解冻引擎（proc.suspend/resume 的深度节流）。
+    ///
+    /// 无 `lifecycle` 能力的驱动返回 `E_UNSUPPORTED`；内核对此降级为
+    /// 仅调度层挂起（不转发给引擎）。
+    async fn set_lifecycle(&self, frozen: bool) -> HalResult<()> {
+        let _ = frozen;
+        Err(AbiError::new(
+            scootlens_abi::ErrorCode::Unsupported,
+            "engine lifecycle control is not supported",
+        ))
+    }
+
     /// 引擎事件流（broadcast：订阅后才收到事件）。
     fn events(&self) -> broadcast::Receiver<EngineEvent>;
 

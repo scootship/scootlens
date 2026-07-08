@@ -17,8 +17,10 @@ mod proc;
 mod redact;
 mod security;
 mod vfs;
+mod wf;
 
-pub use bus::{BusEvent, BusPayload};
+use bus::Bus;
+pub use bus::{BusEvent, BusPayload, BusReceiver, BusRecvError, WfRunStatus};
 pub use dispatch::Dispatcher;
 pub use journal::{Journal, JournalEntry, JournalKind, JournalLine, parse_lines};
 pub use netstack::{NetStack, ProcPolicy};
@@ -26,6 +28,7 @@ pub use proc::{ProcInfo, ProcState};
 pub use redact::Redactor;
 pub use security::{AuthzGate, Caller, SecurityManager};
 pub use vfs::StateVfs;
+pub use wf::WfClock;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -33,10 +36,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use scootlens_abi::{AbiError, ErrorCode, Pid};
+use scootlens_abi::{AbiError, ErrorCode, Pid, QuotaPolicy, QuotaSpec, SnapId};
 use scootlens_hal::{
     A11ySnapshot, ActResult, EngineCaps, EngineDriver, EngineEvent, EngineHandle, EngineMetrics,
-    HalResult, HistoryDir, InputAction, NavResult, ProfileSpec, SnapshotOpts,
+    HalResult, HistoryDir, InputAction, NavResult, ProfileSpec, SnapshotOpts, StateBundle,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, broadcast};
@@ -47,13 +50,18 @@ use url::Url;
 pub struct KernelConfig {
     /// 全局并发进程上限；超出的 spawn 请求 FIFO 排队。
     pub max_procs: usize,
-    /// Event Bus 缓冲容量（慢订阅者会丢事件并收到 Lagged）。
+    /// Event Bus 高频主题（nav/console/net.request）的每订阅者队列容量；
+    /// 慢订阅者丢最旧事件并计数。关键主题（生命周期/审批/配额/工作流）永不丢。
     pub bus_capacity: usize,
     /// 状态目录（journal / keys / vault / downloads / uploads）。
     /// None = 内存模式（测试）。
     pub state_dir: Option<PathBuf>,
     /// 人工审批的调用内等待上限；超时返回 `E_APPROVAL_PENDING`。
     pub approval_timeout: Duration,
+    /// 配额监控轮询间隔。
+    pub quota_poll_interval: Duration,
+    /// 高配额门槛：`proc.spawn` 申请的内存配额超过此值需 `quota:high` 作用域。
+    pub quota_high_bytes: u64,
 }
 
 impl Default for KernelConfig {
@@ -63,6 +71,8 @@ impl Default for KernelConfig {
             bus_capacity: 1024,
             state_dir: None,
             approval_timeout: Duration::from_secs(60),
+            quota_poll_interval: Duration::from_millis(500),
+            quota_high_bytes: 2 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -83,9 +93,11 @@ struct ProcEntry {
     engine: &'static str,
     profile: String,
     handle: Option<Arc<dyn EngineHandle>>,
-    /// 占用的调度槽位；Terminated/Crashed 时释放。
+    /// 占用的调度槽位；Terminated/Crashed/Suspended 时释放。
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
     supervisor: Option<tokio::task::JoinHandle<()>>,
+    /// 配额监控任务（spawn 带 quotas 时存在）。
+    quota_monitor: Option<tokio::task::JoinHandle<()>>,
     /// 当前页面 URL（origin 鉴权依据）。
     current_url: Option<Url>,
 }
@@ -95,7 +107,7 @@ struct Inner {
     config: KernelConfig,
     procs: Mutex<HashMap<Pid, ProcEntry>>,
     slots: Arc<Semaphore>,
-    bus: broadcast::Sender<BusEvent>,
+    bus: Bus,
     seq: AtomicU64,
     pid_counter: AtomicU64,
     security: SecurityManager,
@@ -112,7 +124,12 @@ impl Inner {
 
     fn emit(&self, pid: Option<Pid>, payload: BusPayload) {
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-        let _ = self.bus.send(BusEvent { seq, pid, payload });
+        self.bus.publish(BusEvent {
+            seq,
+            pid,
+            dropped: None,
+            payload,
+        });
     }
 
     fn next_pid(&self) -> Pid {
@@ -161,7 +178,7 @@ impl Kernel {
             None => Journal::in_memory(),
         };
         let vfs = StateVfs::open(state_dir.as_deref())?;
-        let (bus, _) = broadcast::channel(config.bus_capacity);
+        let bus = Bus::new(config.bus_capacity);
         let slots = Arc::new(Semaphore::new(config.max_procs));
         Ok(Self {
             inner: Arc::new(Inner {
@@ -225,7 +242,16 @@ impl Kernel {
     // ---------- Process Manager ----------
 
     /// 启动进程。并发上限已满时排队（FIFO），直到有槽位释放。
-    pub async fn spawn(&self, mut profile: ProfileSpec) -> HalResult<Pid> {
+    pub async fn spawn(&self, profile: ProfileSpec) -> HalResult<Pid> {
+        self.spawn_with(profile, None).await
+    }
+
+    /// 启动进程并附加资源配额（配额监控见 docs/04-kernel-design.md §4.2）。
+    pub async fn spawn_with(
+        &self,
+        mut profile: ProfileSpec,
+        quotas: Option<QuotaSpec>,
+    ) -> HalResult<Pid> {
         let permit = Arc::clone(&self.inner.slots)
             .acquire_owned()
             .await
@@ -246,11 +272,31 @@ impl Kernel {
             handle.set_request_policy(Some(policy)).await?;
         }
 
+        // profile 复用：存在已导入的 profile 状态且引擎支持 state → 预加载
+        if self.inner.driver.capabilities().state
+            && let Some(text) = self.inner.vfs.profile_read(&profile.name)
+        {
+            match serde_json::from_str::<StateBundle>(&text) {
+                Ok(bundle) => handle.import_state(&bundle).await?,
+                Err(e) => {
+                    tracing::warn!(profile = %profile.name, %e, "profile state unreadable; skipped");
+                }
+            }
+        }
+
         let supervisor = tokio::spawn(supervise(
             Arc::clone(&self.inner),
             pid.clone(),
             handle.events(),
         ));
+        let quota_monitor = quotas.map(|q| {
+            tokio::spawn(monitor_quota(
+                Arc::clone(&self.inner),
+                pid.clone(),
+                Arc::clone(&handle),
+                q,
+            ))
+        });
 
         self.inner.lock_procs().insert(
             pid.clone(),
@@ -261,6 +307,7 @@ impl Kernel {
                 handle: Some(handle),
                 permit: Some(permit),
                 supervisor: Some(supervisor),
+                quota_monitor,
                 current_url: None,
             },
         );
@@ -301,11 +348,96 @@ impl Kernel {
         })
     }
 
+    /// 挂起进程：释放调度槽 +（引擎支持时）冻结页面；挂起期间拒绝引擎操作。
+    ///
+    /// 仅 Running 可挂起；其余状态返回 `E_INVALID_ARG`。
+    pub async fn suspend(&self, pid: &Pid) -> HalResult<()> {
+        let (handle, permit) = {
+            let mut procs = self.inner.lock_procs();
+            let e = procs.get_mut(pid).ok_or_else(|| not_found(pid))?;
+            match e.state {
+                ProcState::Running => {
+                    e.state = ProcState::Suspended;
+                    (e.handle.clone(), e.permit.take())
+                }
+                other => {
+                    return Err(AbiError::new(
+                        ErrorCode::InvalidArg,
+                        format!("cannot suspend proc in state {other:?}"),
+                    ));
+                }
+            }
+        };
+        drop(permit); // 让出调度槽：挂起进程不占并发预算
+        if self.inner.driver.capabilities().lifecycle
+            && let Some(h) = handle
+        {
+            // 冻结失败不回滚：调度语义已生效，冻结只是尽力省资源
+            if let Err(err) = h.set_lifecycle(true).await {
+                tracing::warn!(%pid, %err, "engine freeze failed (suspend continues)");
+            }
+        }
+        self.inner.emit(
+            Some(pid.clone()),
+            BusPayload::ProcLifecycle {
+                state: ProcState::Suspended,
+            },
+        );
+        tracing::info!(%pid, "proc suspended");
+        Ok(())
+    }
+
+    /// 恢复挂起的进程：重新排队取调度槽（FIFO），成功后解冻并回到 Running。
+    pub async fn resume(&self, pid: &Pid) -> HalResult<()> {
+        {
+            let procs = self.inner.lock_procs();
+            let e = procs.get(pid).ok_or_else(|| not_found(pid))?;
+            if e.state != ProcState::Suspended {
+                return Err(AbiError::new(
+                    ErrorCode::InvalidArg,
+                    format!("cannot resume proc in state {:?}", e.state),
+                ));
+            }
+        }
+        let permit = Arc::clone(&self.inner.slots)
+            .acquire_owned()
+            .await
+            .map_err(|_| AbiError::new(ErrorCode::Internal, "scheduler closed"))?;
+        let handle = {
+            let mut procs = self.inner.lock_procs();
+            let e = procs.get_mut(pid).ok_or_else(|| not_found(pid))?;
+            if e.state != ProcState::Suspended {
+                // 排队等槽期间被 kill 或崩溃
+                return Err(AbiError::new(
+                    ErrorCode::InvalidArg,
+                    format!("cannot resume proc in state {:?}", e.state),
+                ));
+            }
+            e.state = ProcState::Running;
+            e.permit = Some(permit);
+            e.handle.clone()
+        };
+        if self.inner.driver.capabilities().lifecycle
+            && let Some(h) = handle
+            && let Err(err) = h.set_lifecycle(false).await
+        {
+            tracing::warn!(%pid, %err, "engine unfreeze failed (resume continues)");
+        }
+        self.inner.emit(
+            Some(pid.clone()),
+            BusPayload::ProcLifecycle {
+                state: ProcState::Running,
+            },
+        );
+        tracing::info!(%pid, "proc resumed");
+        Ok(())
+    }
+
     /// 终止进程：关闭引擎、释放槽位、状态 → Terminated。
     ///
     /// 对已 Terminated 的进程返回 `E_INVALID_ARG`。
     pub async fn kill(&self, pid: &Pid) -> HalResult<()> {
-        let (handle, permit, supervisor) = {
+        let (handle, permit, supervisor, quota_monitor) = {
             let mut procs = self.inner.lock_procs();
             let e = procs.get_mut(pid).ok_or_else(|| not_found(pid))?;
             match e.state {
@@ -315,14 +447,25 @@ impl Kernel {
                         format!("proc {pid} already terminated"),
                     ));
                 }
-                ProcState::Spawning | ProcState::Running | ProcState::Crashed => {
+                ProcState::Spawning
+                | ProcState::Running
+                | ProcState::Suspended
+                | ProcState::Crashed => {
                     e.state = ProcState::Terminated;
-                    (e.handle.take(), e.permit.take(), e.supervisor.take())
+                    (
+                        e.handle.take(),
+                        e.permit.take(),
+                        e.supervisor.take(),
+                        e.quota_monitor.take(),
+                    )
                 }
             }
         };
         if let Some(s) = supervisor {
             s.abort();
+        }
+        if let Some(q) = quota_monitor {
+            q.abort();
         }
         if let Some(h) = handle {
             // 尽力关闭；引擎可能已崩溃
@@ -347,6 +490,10 @@ impl Kernel {
         let e = procs.get(pid).ok_or_else(|| not_found(pid))?;
         match (&e.state, &e.handle) {
             (ProcState::Running, Some(h)) => Ok(Arc::clone(h)),
+            (ProcState::Suspended, _) => Err(AbiError::new(
+                ErrorCode::InvalidArg,
+                format!("proc {pid} is suspended; resume it first"),
+            )),
             (ProcState::Crashed, _) => Err(AbiError::new(
                 ErrorCode::EngineCrash,
                 format!("proc {pid} engine crashed"),
@@ -420,10 +567,109 @@ impl Kernel {
         self.handle_of(pid)?.import_state(bundle).await
     }
 
+    // ---------- 快照 / 恢复 / profile 复用 ----------
+
+    /// 进程快照：导出会话状态 + 当前 URL，内容寻址落盘，返回 `snap-<hash>`。
+    ///
+    /// Running 与 Suspended 均可快照（挂起后落盘是常规 OS 语义）。
+    pub async fn snapshot_proc(&self, pid: &Pid) -> HalResult<SnapId> {
+        let (handle, profile, url) = {
+            let procs = self.inner.lock_procs();
+            let e = procs.get(pid).ok_or_else(|| not_found(pid))?;
+            match (&e.state, &e.handle) {
+                (ProcState::Running | ProcState::Suspended, Some(h)) => {
+                    (Arc::clone(h), e.profile.clone(), e.current_url.clone())
+                }
+                (ProcState::Crashed, _) => {
+                    return Err(AbiError::new(
+                        ErrorCode::EngineCrash,
+                        format!("proc {pid} engine crashed"),
+                    ));
+                }
+                _ => return Err(not_found(pid)),
+            }
+        };
+        let state = handle.export_state().await?;
+        let doc = SnapshotDoc {
+            engine: self.inner.driver.id().to_owned(),
+            profile,
+            url: url.map(|u| u.to_string()),
+            state,
+        };
+        let text = serde_json::to_string_pretty(&doc)
+            .map_err(|e| AbiError::new(ErrorCode::Internal, format!("snapshot encode: {e}")))?;
+        let hash = self.inner.vfs.snapshot_write(&text)?;
+        let snap: SnapId = format!("snap-{hash}")
+            .parse()
+            .map_err(|e| AbiError::new(ErrorCode::Internal, format!("snap id: {e}")))?;
+        tracing::info!(%pid, %snap, "proc snapshot stored");
+        Ok(snap)
+    }
+
+    /// 从快照恢复为新进程：spawn（同 profile）→ 导航回原 URL → 导入状态。
+    ///
+    /// `engine` 提供时须与当前驱动一致；快照的记录引擎不符也拒绝。
+    pub async fn restore_proc(&self, snap: &SnapId, engine: Option<&str>) -> HalResult<Pid> {
+        let text = self.inner.vfs.snapshot_read(snap.suffix())?;
+        let doc: SnapshotDoc = serde_json::from_str(&text)
+            .map_err(|e| AbiError::new(ErrorCode::Internal, format!("snapshot decode: {e}")))?;
+        let current = self.inner.driver.id();
+        let want = engine.unwrap_or(&doc.engine);
+        if want != current || doc.engine != current {
+            return Err(AbiError::new(
+                ErrorCode::InvalidArg,
+                format!(
+                    "snapshot engine {:?} (requested {want:?}) does not match kernel engine {current:?}",
+                    doc.engine
+                ),
+            ));
+        }
+        let pid = self
+            .spawn(ProfileSpec {
+                name: doc.profile,
+                download_dir: None,
+            })
+            .await?;
+        // 先导航后导入：storage 类状态依赖页面 origin 已就位
+        if let Some(url_text) = &doc.url
+            && let Ok(url) = Url::parse(url_text)
+        {
+            self.navigate(&pid, &url).await?;
+        }
+        self.handle_of(&pid)?.import_state(&doc.state).await?;
+        tracing::info!(%snap, %pid, "proc restored from snapshot");
+        Ok(pid)
+    }
+
+    /// `state.import`：把状态包并入 profile 存储；后续以该 profile spawn 时预加载。
+    pub fn import_profile_state(
+        &self,
+        profile: &str,
+        bundle: &scootlens_hal::StateBundle,
+    ) -> HalResult<()> {
+        let mut merged: StateBundle = self
+            .inner
+            .vfs
+            .profile_read(profile)
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        merged.entries.extend(bundle.entries.clone());
+        let text = serde_json::to_string_pretty(&merged)
+            .map_err(|e| AbiError::new(ErrorCode::Internal, format!("profile encode: {e}")))?;
+        self.inner.vfs.profile_write(profile, &text)?;
+        tracing::info!(%profile, entries = merged.entries.len(), "profile state imported");
+        Ok(())
+    }
+
+    /// 高配额门槛（dispatch 鉴权 `quota:high` 用）。
+    pub fn quota_high_bytes(&self) -> u64 {
+        self.inner.config.quota_high_bytes
+    }
+
     // ---------- Event Bus / sys ----------
 
     /// 订阅内核事件总线。
-    pub fn subscribe(&self) -> broadcast::Receiver<BusEvent> {
+    pub fn subscribe(&self) -> BusReceiver {
         self.inner.bus.subscribe()
     }
 
@@ -449,6 +695,16 @@ fn not_found(pid: &Pid) -> AbiError {
     AbiError::new(ErrorCode::ProcNotFound, format!("proc {pid} not found"))
 }
 
+/// 快照文件内容（`state_dir/snapshots/<hash>.json`）。
+#[derive(Debug, Serialize, Deserialize)]
+struct SnapshotDoc {
+    engine: String,
+    profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    state: StateBundle,
+}
+
 /// URL → 规范化 origin（`host` 或 `host:port`，仅显式端口带端口）。
 pub fn origin_of(url: &Url) -> Option<String> {
     let host = url.host_str()?;
@@ -466,7 +722,7 @@ async fn supervise(inner: Arc<Inner>, pid: Pid, mut events: broadcast::Receiver<
                 let permit = {
                     let mut procs = inner.lock_procs();
                     match procs.get_mut(&pid) {
-                        Some(e) if e.state == ProcState::Running => {
+                        Some(e) if matches!(e.state, ProcState::Running | ProcState::Suspended) => {
                             e.state = ProcState::Crashed;
                             e.handle.take();
                             e.permit.take()
@@ -504,5 +760,76 @@ async fn supervise(inner: Arc<Inner>, pid: Pid, mut events: broadcast::Receiver<
             }
             Err(broadcast::error::RecvError::Closed) => break,
         }
+    }
+}
+
+/// 配额监控：轮询引擎内存指标，越过水位 → 事件 + journal + 按策略处置。
+///
+/// 越限只在"跨越水位"时触发一次（回落后可再次触发），避免风暴。
+async fn monitor_quota(
+    inner: Arc<Inner>,
+    pid: Pid,
+    handle: Arc<dyn EngineHandle>,
+    quota: QuotaSpec,
+) {
+    let mut over = false;
+    loop {
+        tokio::time::sleep(inner.config.quota_poll_interval).await;
+        // 进程离场（终止/崩溃/句柄被替换）即退出
+        let state = match inner.lock_procs().get(&pid) {
+            Some(e) => e.state,
+            None => break,
+        };
+        if matches!(state, ProcState::Terminated | ProcState::Crashed) {
+            break;
+        }
+        let usage = match handle.metrics().await {
+            Ok(m) => m.memory_bytes,
+            Err(_) => continue, // 瞬时失败（如挂起中的引擎）不触发处置
+        };
+        let exceeded = usage > quota.max_memory_bytes;
+        if exceeded && !over {
+            inner.journal.record(
+                JournalKind::Deny,
+                "kernel:quota",
+                "quota.exceeded",
+                Some(pid.as_str()),
+                serde_json::json!({
+                    "usage_bytes": usage,
+                    "limit_bytes": quota.max_memory_bytes,
+                    "policy": quota.on_exceed,
+                }),
+            );
+            inner.emit(
+                Some(pid.clone()),
+                BusPayload::QuotaExceeded {
+                    usage_bytes: usage,
+                    limit_bytes: quota.max_memory_bytes,
+                    policy: quota.on_exceed,
+                },
+            );
+            tracing::warn!(%pid, usage, limit = quota.max_memory_bytes, "memory quota exceeded");
+            match quota.on_exceed {
+                QuotaPolicy::Warn => {}
+                QuotaPolicy::Suspend => {
+                    let kernel = Kernel {
+                        inner: Arc::clone(&inner),
+                    };
+                    if let Err(err) = kernel.suspend(&pid).await {
+                        tracing::warn!(%pid, %err, "quota suspend failed");
+                    }
+                }
+                QuotaPolicy::Kill => {
+                    let kernel = Kernel {
+                        inner: Arc::clone(&inner),
+                    };
+                    if let Err(err) = kernel.kill(&pid).await {
+                        tracing::warn!(%pid, %err, "quota kill failed");
+                    }
+                    break;
+                }
+            }
+        }
+        over = exceeded;
     }
 }

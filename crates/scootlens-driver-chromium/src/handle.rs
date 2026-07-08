@@ -484,17 +484,85 @@ impl EngineHandle for ChromiumHandle {
     }
 
     async fn export_state(&self) -> HalResult<StateBundle> {
-        Err(AbiError::new(
-            ErrorCode::Unsupported,
-            "state export lands in P2 (chromium)",
-        ))
+        let mut bundle = StateBundle::default();
+
+        // cookies：完整属性作为不透明值保存（restore 时原样 setCookie）
+        let v = self.call("Network.getCookies", json!({})).await?;
+        if let Some(cookies) = v["cookies"].as_array() {
+            for c in cookies {
+                if let Some(name) = c["name"].as_str() {
+                    bundle.entries.insert(
+                        format!("cookie:{name}"),
+                        json!({
+                            "value": c["value"],
+                            "domain": c["domain"],
+                            "path": c["path"],
+                            "secure": c["secure"],
+                            "httpOnly": c["httpOnly"],
+                        }),
+                    );
+                }
+            }
+        }
+
+        // localStorage：当前 origin 的全部键值
+        let v = self
+            .call(
+                "Runtime.evaluate",
+                json!({
+                    "expression": "try { JSON.stringify(Object.entries(localStorage)) } catch (_) { \"[]\" }",
+                    "returnByValue": true,
+                }),
+            )
+            .await?;
+        if let Some(text) = v.pointer("/result/value").and_then(Value::as_str)
+            && let Ok(Value::Array(pairs)) = serde_json::from_str::<Value>(text)
+        {
+            for pair in pairs {
+                if let (Some(k), Some(val)) = (pair[0].as_str(), pair.get(1)) {
+                    bundle.entries.insert(format!("storage:{k}"), val.clone());
+                }
+            }
+        }
+        Ok(bundle)
     }
 
-    async fn import_state(&self, _bundle: &StateBundle) -> HalResult<()> {
-        Err(AbiError::new(
-            ErrorCode::Unsupported,
-            "state import lands in P2 (chromium)",
-        ))
+    async fn import_state(&self, bundle: &StateBundle) -> HalResult<()> {
+        let page_url = self.current_page().await?.url;
+        for (key, value) in &bundle.entries {
+            if let Some(name) = key.strip_prefix("cookie:") {
+                let mut params = json!({ "name": name });
+                match value {
+                    // export_state 产出的完整 cookie 对象
+                    Value::Object(o) => {
+                        params["value"] = o.get("value").cloned().unwrap_or(Value::Null);
+                        for k in ["domain", "path", "secure", "httpOnly"] {
+                            if let Some(v) = o.get(k) {
+                                params[k] = v.clone();
+                            }
+                        }
+                    }
+                    // 裸值：以当前页 URL 为上下文
+                    other => {
+                        params["value"] = json!(value_as_cookie_str(other));
+                        params["url"] = json!(page_url.as_str());
+                    }
+                }
+                self.call("Network.setCookie", params).await?;
+            } else if let Some(name) = key.strip_prefix("storage:") {
+                let k = serde_json::to_string(name).unwrap_or_default();
+                let v = serde_json::to_string(&value_as_cookie_str(value)).unwrap_or_default();
+                self.call(
+                    "Runtime.evaluate",
+                    json!({
+                        "expression": format!("localStorage.setItem({k}, {v})"),
+                        "returnByValue": true,
+                    }),
+                )
+                .await?;
+            }
+        }
+        Ok(())
     }
 
     async fn set_request_policy(&self, _policy: Option<Arc<dyn RequestPolicy>>) -> HalResult<()> {
@@ -504,15 +572,29 @@ impl EngineHandle for ChromiumHandle {
         ))
     }
 
+    async fn set_lifecycle(&self, frozen: bool) -> HalResult<()> {
+        let state = if frozen { "frozen" } else { "active" };
+        self.call("Page.setWebLifecycleState", json!({ "state": state }))
+            .await?;
+        Ok(())
+    }
+
     fn events(&self) -> broadcast::Receiver<EngineEvent> {
         self.events.subscribe()
     }
 
     async fn metrics(&self) -> HalResult<EngineMetrics> {
-        Err(AbiError::new(
-            ErrorCode::Unsupported,
-            "metrics land in P2 (chromium)",
-        ))
+        // Performance.enable 幂等；getMetrics 取 JSHeapUsedSize 作为内存水位
+        self.call("Performance.enable", json!({})).await?;
+        let v = self.call("Performance.getMetrics", json!({})).await?;
+        let memory_bytes = v["metrics"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|m| m["name"] == "JSHeapUsedSize")
+            .and_then(|m| m["value"].as_f64())
+            .unwrap_or(0.0) as u64;
+        Ok(EngineMetrics { memory_bytes })
     }
 
     async fn shutdown(&self) -> HalResult<()> {
@@ -633,4 +715,12 @@ fn key_info(key: &str) -> HalResult<(&'static str, u32, &'static str)> {
             ));
         }
     })
+}
+
+/// 状态值转字符串：字符串取原文，其余序列化（导入 cookie/localStorage 用）。
+fn value_as_cookie_str(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
 }

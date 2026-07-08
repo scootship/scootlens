@@ -132,6 +132,7 @@ async fn disabled_caps_return_unsupported() {
         state: false,
         events: true,
         metrics: true,
+        lifecycle: false,
     };
     let d = MockDriver::standard_fixture().with_caps(caps);
     let h = d.spawn(&ProfileSpec::default()).await.expect("spawn");

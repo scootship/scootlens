@@ -1,4 +1,5 @@
-//! State VFS：vault（加密、Agent 只写不读）、downloads、uploads 沙箱
+//! State VFS：vault（加密、Agent 只写不读）、downloads、uploads 沙箱、
+//! snapshots（内容寻址快照）、profiles（可复用会话状态）
 //! （docs/04-kernel-design.md §4.4、docs/06-security-model.md T3）。
 //!
 //! 目录布局：
@@ -11,6 +12,8 @@
 //!   vault/vault.enc       # 加密 blob：JSON {name: secret}
 //!   downloads/            # 引擎下载落盘
 //!   uploads/              # act.upload 允许引用的唯一来源
+//!   snapshots/<hash>.json # proc.snapshot 内容寻址存储（sha256 前 16 hex）
+//!   profiles/<name>.json  # state.import 的 profile 状态（spawn 预加载）
 //! ```
 
 use std::collections::BTreeMap;
@@ -21,11 +24,16 @@ use chacha20poly1305::aead::{Aead, AeadCore, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use scootlens_abi::{AbiError, ErrorCode};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-/// State VFS。`root = None` → vault 内存模式、downloads/uploads 不可用。
+/// State VFS。`root = None` → vault/snapshots/profiles 内存模式、downloads/uploads 不可用。
 pub struct StateVfs {
     root: Option<PathBuf>,
     vault: Mutex<VaultStore>,
+    /// 内存模式的快照存储（root 存在时不使用）。
+    mem_snapshots: Mutex<BTreeMap<String, String>>,
+    /// 内存模式的 profile 状态存储。
+    mem_profiles: Mutex<BTreeMap<String, String>>,
 }
 
 impl StateVfs {
@@ -34,6 +42,8 @@ impl StateVfs {
             Some(dir) => {
                 std::fs::create_dir_all(dir.join("downloads"))?;
                 std::fs::create_dir_all(dir.join("uploads"))?;
+                std::fs::create_dir_all(dir.join("snapshots"))?;
+                std::fs::create_dir_all(dir.join("profiles"))?;
                 VaultStore::open(&dir.join("vault"))?
             }
             None => VaultStore::in_memory(),
@@ -41,6 +51,8 @@ impl StateVfs {
         Ok(Self {
             root: root.map(Path::to_path_buf),
             vault: Mutex::new(vault),
+            mem_snapshots: Mutex::new(BTreeMap::new()),
+            mem_profiles: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -104,6 +116,115 @@ impl StateVfs {
 
     fn lock_vault(&self) -> std::sync::MutexGuard<'_, VaultStore> {
         self.vault.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    // ---------- snapshots（内容寻址，sha256 前 16 hex） ----------
+
+    /// 写快照内容，返回内容哈希（sha256 前 16 hex；同内容天然去重）。
+    pub fn snapshot_write(&self, content: &str) -> Result<String, AbiError> {
+        let hash = content_hash(content);
+        match &self.root {
+            Some(root) => {
+                let path = root.join("snapshots").join(format!("{hash}.json"));
+                std::fs::write(&path, content).map_err(|e| {
+                    AbiError::new(ErrorCode::Internal, format!("snapshot write: {e}"))
+                })?;
+            }
+            None => {
+                self.mem_snapshots
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(hash.clone(), content.to_owned());
+            }
+        }
+        Ok(hash)
+    }
+
+    /// 读快照内容；哈希非法或不存在 → `E_INVALID_ARG`。
+    pub fn snapshot_read(&self, hash: &str) -> Result<String, AbiError> {
+        // 哈希字符白名单：内容寻址键绝不参与路径拼接以外的语义
+        if hash.is_empty() || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(AbiError::new(
+                ErrorCode::InvalidArg,
+                format!("invalid snapshot hash {hash:?}"),
+            ));
+        }
+        match &self.root {
+            Some(root) => {
+                let path = root.join("snapshots").join(format!("{hash}.json"));
+                std::fs::read_to_string(&path).map_err(|_| snapshot_not_found(hash))
+            }
+            None => self
+                .mem_snapshots
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(hash)
+                .cloned()
+                .ok_or_else(|| snapshot_not_found(hash)),
+        }
+    }
+
+    // ---------- profiles（state.import 目标；spawn 预加载） ----------
+
+    /// 写 profile 状态；名字须匹配 `[A-Za-z0-9][A-Za-z0-9._-]*`（拒绝路径穿越）。
+    pub fn profile_write(&self, name: &str, content: &str) -> Result<(), AbiError> {
+        validate_profile_name(name)?;
+        match &self.root {
+            Some(root) => {
+                let path = root.join("profiles").join(format!("{name}.json"));
+                std::fs::write(&path, content)
+                    .map_err(|e| AbiError::new(ErrorCode::Internal, format!("profile write: {e}")))
+            }
+            None => {
+                self.mem_profiles
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(name.to_owned(), content.to_owned());
+                Ok(())
+            }
+        }
+    }
+
+    /// 读 profile 状态；不存在返回 None（名字非法也视为不存在）。
+    pub fn profile_read(&self, name: &str) -> Option<String> {
+        if validate_profile_name(name).is_err() {
+            return None;
+        }
+        match &self.root {
+            Some(root) => {
+                std::fs::read_to_string(root.join("profiles").join(format!("{name}.json"))).ok()
+            }
+            None => self
+                .mem_profiles
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(name)
+                .cloned(),
+        }
+    }
+}
+
+/// sha256 前 16 hex（64-bit 内容寻址键）。
+fn content_hash(content: &str) -> String {
+    let digest = Sha256::digest(content.as_bytes());
+    hex::encode(&digest[..8])
+}
+
+fn snapshot_not_found(hash: &str) -> AbiError {
+    AbiError::new(ErrorCode::InvalidArg, format!("no such snapshot: {hash}"))
+}
+
+fn validate_profile_name(name: &str) -> Result<(), AbiError> {
+    let mut chars = name.chars();
+    let head_ok = chars.next().is_some_and(|c| c.is_ascii_alphanumeric());
+    let rest_ok = chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if head_ok && rest_ok && name.len() <= 64 {
+        Ok(())
+    } else {
+        Err(AbiError::new(
+            ErrorCode::InvalidArg,
+            format!("invalid profile name {name:?} (want [A-Za-z0-9][A-Za-z0-9._-]*, <=64 chars)"),
+        ))
     }
 }
 

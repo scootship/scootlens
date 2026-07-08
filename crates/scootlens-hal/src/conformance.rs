@@ -177,10 +177,11 @@ pub async fn state_roundtrip_or_unsupported(t: &Target) {
     if t.driver.capabilities().state {
         h.import_state(&bundle).await.expect("import");
         let out = h.export_state().await.expect("export");
-        assert_eq!(
-            out.entries.get("cookie:sid"),
-            Some(&serde_json::json!("abc123"))
-        );
+        let got = out.entries.get("cookie:sid").expect("cookie must survive");
+        // 引擎可把 cookie 规范化为富对象（domain/path/secure…，恢复保真需要）；
+        // 语义值必须往返不变。
+        let value = got.get("value").unwrap_or(got);
+        assert_eq!(value, &serde_json::json!("abc123"));
     } else {
         let err = h
             .import_state(&bundle)

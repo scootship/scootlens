@@ -179,6 +179,9 @@ pub struct EngineCaps {
     pub state: bool,
     pub events: bool,
     pub metrics: bool,
+    /// 引擎级冻结/解冻（proc.suspend 深度节流）。
+    #[serde(default)]
+    pub lifecycle: bool,
 }
 
 /// 引擎指标（供 Scheduler 配额）。

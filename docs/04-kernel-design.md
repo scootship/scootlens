@@ -21,14 +21,16 @@ stateDiagram-v2
 ```
 
 - **监督（supervision）**：驱动上报引擎存活；崩溃→标记 `Crashed`、广播 `proc.lifecycle` 事件、按策略从最近 proc.snapshot 自动恢复
-- **proc.snapshot（P3）**：state.export（cookie/storage）+ 当前 URL/导航栈 + profile 归档 → 内容寻址存储；`restore` 可跨引擎（能力矩阵允许时）
+- **proc.suspend/resume（P3 已落地）**：挂起把调度槽让还 Scheduler（挂起进程不占并发预算）、拒绝一切引擎操作（`E_INVALID_ARG`），引擎支持 `lifecycle` 能力时尽力冻结（Chromium `Page.setWebLifecycleState`；冻结失败不回滚挂起）；恢复按 FIFO 重新排队取槽后解冻
+- **proc.snapshot/restore（P3 已落地）**：`export_state`（cookie/storage）+ 当前 URL + profile → 序列化为 `SnapshotDoc`，内容寻址存储（`state_dir/snapshots/<sha256 前 16hex>.json`，同状态幂等同 id）；`restore` = spawn（同 profile）→ 导航原 URL → 导入状态（先导航后导入，storage 依赖 origin 就位）；快照记录引擎 id，恢复时不匹配拒绝（跨引擎恢复留待能力矩阵允许时放开）
 - **隔离**：一 proc 一引擎进程一 profile 目录；目录权限 0700；proc 间无共享
+- **profile 复用（P3 已落地）**：`state.import` 把状态包合并写入 `state_dir/profiles/<name>.json`；以该 profile spawn 时（引擎具备 `state` 能力）自动预加载
 
 ## 4.2 Scheduler
 
 - P1：全局并发上限 + spawn 排队（FIFO + 优先级）
-- P3：配额 —— 每 proc 内存水位（驱动上报指标）、CPU nice（Linux cgroup v2 可用时）、网络限速（net 层）；超限→事件告警→按策略 suspend/kill
-- 配额随 `proc.spawn` 声明，Security Manager 校验申请者是否有 `quota:high` 能力
+- P3（已落地）：内存配额 —— `proc.spawn` 随 `quotas.max_memory_bytes` 声明；内核按 `quota_poll_interval` 轮询驱动 `metrics()`，越过水位（带去抖：回落后再越界才再次触发）→ journal `Deny` + `quota.exceeded` 事件 + 按 `on_exceed` 策略处置（warn / suspend / kill）；CPU nice 与网络限速为后续保留位
+- 配额随 `proc.spawn` 声明，超过内核 `quota_high_bytes` 阈值时 Security Manager 额外校验 `quota:high` 能力
 
 ## 4.3 State VFS
 
@@ -43,13 +45,14 @@ stateDiagram-v2
 | `vault://` | 密钥库 | **永不**（仅内核内部解引用） | Console/管理员 |
 
 - 后端：**P2 为文件系统**——vault（ChaCha20-Poly1305 加密文件 + `0600` 密钥）、downloads/uploads 沙箱目录、cookie/storage 经引擎 `export_state`/`import_state` 桥接；SQLite 元数据与平台 keyring 为后续演进
+- P3 新增两个目录：`snapshots/`（proc.snapshot 的内容寻址文档，键为 sha256 前缀且白名单校验）与 `profiles/`（state.import 的合并状态，名字 `[A-Za-z0-9][A-Za-z0-9._-]*` 白名单防穿越）；无 state_dir 时退化为内存模式（测试/嵌入）
 - uploads 沙箱：`act.upload` 的路径经 `canonicalize` + 前缀校验限制在 `<state-dir>/uploads/` 内，越界返回 `E_INVALID_ARG`（防目录穿越）
 - **vault 解引用**只发生在驱动注入输入的瞬间，值不落 journal、不落 trace、不回传
 
 ## 4.4 Event Bus
 
-- tokio broadcast + 每订阅者有界队列
-- **背压策略**：高频主题（`dom.mutation`、`net.*`）满时丢弃并累计 `dropped_count` 随下一条事件告知；生命周期/审批类主题**永不丢弃**（有界阻塞）
+- 自研总线（P3 起替换 tokio broadcast）：每订阅者独立 `VecDeque` + `Notify`，发布同步、消费异步
+- **背压策略（已落地）**：高频主题（`nav`、`console`、`net.request`）队满时丢弃**同类**最旧事件并累计计数，`dropped` 随该订阅者的下一条事件带出；关键主题（`proc.lifecycle`、`cap.request`、`quota.exceeded`、`wf.run`）无界、永不丢弃，且不会被高频洪峰挤掉
 - 所有事件带单调 `seq` 与 `pid`，供回放对齐
 
 ## 4.5 Security Manager
@@ -66,10 +69,12 @@ stateDiagram-v2
 - P4+：独立 Rust 代理（引擎无关的统一强制点 + HAR 采集），引擎以 proxy 模式接入
 - 规则求值顺序：proc 级 → 全局级；默认策略可配置（默认 `allow` + 显式 denylist，或白名单模式）
 
-## 4.7 Workflow Daemon（P3）
+## 4.7 Workflow Daemon（P3 已落地）
 
-- 声明式 spec：触发器（cron / 事件）+ 步骤（ABI 调用序列 + 条件/重试）
-- 以受限 capability 令牌运行（最小权限），失败重试带指数退避，全程 journal
+- 声明式 spec：`name` + 触发器（cron 5 段 UTC / 总线事件 / manual）+ 步骤（ABI 调用序列 + 指数退避重试）+ `scopes`
+- **最小权限闭包**：`wf.create` 校验 `spec.scopes ⊆ 创建者有效作用域`（拒绝提权）；运行主体为独立的 `wf:<name>`，只持有 spec 声明的作用域
+- 每步经 Dispatcher 分发——journal 与鉴权免费获得，巡检流全程可追溯；单实例防重入（运行中触发被跳过，手动 `wf.run` 返回 `E_INVALID_ARG`）
+- cron 精度到分钟（30s tick + 按分钟去重），时钟可注入（测试受控）
 - **不是** Agent 编排器：无 LLM 调用；需要智能的步骤交给用户空间 Agent 订阅事件后接管
 
 ## 4.8 Observability

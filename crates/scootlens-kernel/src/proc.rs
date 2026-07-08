@@ -3,12 +3,14 @@
 use scootlens_abi::Pid;
 use serde::{Deserialize, Serialize};
 
-/// 进程状态机（docs/04-kernel-design.md 4.1；Suspended 属 P3）。
+/// 进程状态机（docs/04-kernel-design.md 4.1）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcState {
     Spawning,
     Running,
+    /// 挂起：不占调度槽、拒绝引擎操作；resume 后回到 Running。
+    Suspended,
     Terminated,
     Crashed,
 }

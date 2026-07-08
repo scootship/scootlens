@@ -47,6 +47,34 @@ enum Cmd {
     Kill {
         pid: String,
     },
+    /// 挂起进程（让出调度槽）。
+    Suspend {
+        pid: String,
+    },
+    /// 恢复挂起的进程。
+    Resume {
+        pid: String,
+    },
+    /// 进程快照（会话状态 + URL，内容寻址）。
+    Snap {
+        pid: String,
+    },
+    /// 从快照恢复为新进程。
+    Restore {
+        snap_id: String,
+        #[arg(long)]
+        engine: Option<String>,
+    },
+    /// 工作流列表。
+    Wf,
+    /// 手动运行工作流。
+    WfRun {
+        name: String,
+    },
+    /// 注销工作流。
+    WfCancel {
+        name: String,
+    },
     /// 导航。
     Goto {
         pid: String,
@@ -99,6 +127,16 @@ impl Cmd {
             Cmd::Ps => ("proc.list", json!({})),
             Cmd::Info { pid } => ("proc.info", json!({ "pid": pid })),
             Cmd::Kill { pid } => ("proc.kill", json!({ "pid": pid })),
+            Cmd::Suspend { pid } => ("proc.suspend", json!({ "pid": pid })),
+            Cmd::Resume { pid } => ("proc.resume", json!({ "pid": pid })),
+            Cmd::Snap { pid } => ("proc.snapshot", json!({ "pid": pid })),
+            Cmd::Restore { snap_id, engine } => (
+                "proc.restore",
+                json!({ "snap_id": snap_id, "engine": engine }),
+            ),
+            Cmd::Wf => ("wf.list", json!({})),
+            Cmd::WfRun { name } => ("wf.run", json!({ "name": name })),
+            Cmd::WfCancel { name } => ("wf.cancel", json!({ "name": name })),
             Cmd::Goto { pid, url } => ("nav.goto", json!({ "pid": pid, "url": url })),
             Cmd::Back { pid } => ("nav.back", json!({ "pid": pid })),
             Cmd::Forward { pid } => ("nav.forward", json!({ "pid": pid })),

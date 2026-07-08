@@ -4,8 +4,9 @@
 
 use scootlens_abi::{
     ABI_VERSION, AbiError, ApprovalMode, ElementRef, ErrorCode, NetAction, NetDecision, NetRule,
-    NetRuleSet, Pid, RpcId, RpcNotification, RpcRequest, RpcResponse, Scope, TokenClaims,
-    TokenConstraints, is_sensitive, method, origin_matches,
+    NetRuleSet, Pid, QuotaPolicy, QuotaSpec, RpcId, RpcNotification, RpcRequest, RpcResponse,
+    Scope, SnapId, TokenClaims, TokenConstraints, WfRetry, WfSpec, WfStep, WfTrigger, is_sensitive,
+    method, origin_matches,
 };
 use serde_json::json;
 
@@ -44,6 +45,24 @@ fn element_ref_roundtrip_and_staleness() {
 
     for bad in ["", "s3", "e17", "s3e", "sxey", "3e17", "s-1e2", "s3e17z"] {
         assert!(bad.parse::<ElementRef>().is_err(), "should reject {bad:?}");
+    }
+}
+
+#[test]
+fn snap_id_roundtrip_and_validation() {
+    let id: SnapId = "snap-9f2ab04c".parse().expect("valid snap id");
+    assert_eq!(id.to_string(), "snap-9f2ab04c");
+    let js = serde_json::to_string(&id).expect("ser");
+    assert_eq!(js, "\"snap-9f2ab04c\"");
+    let back: SnapId = serde_json::from_str(&js).expect("de");
+    assert_eq!(back, id);
+
+    for bad in ["", "snap-", "p-abc", "snap-ABC", "snap-a b", "9f2ab04c"] {
+        assert!(bad.parse::<SnapId>().is_err(), "should reject {bad:?}");
+        assert!(
+            serde_json::from_value::<SnapId>(json!(bad)).is_err(),
+            "serde should reject {bad:?}"
+        );
     }
 }
 
@@ -131,6 +150,60 @@ fn method_lookup() {
     assert!(method::is_known("proc.spawn"));
     assert!(method::is_known("view.snapshot"));
     assert!(!method::is_known("proc.hack"));
+}
+
+// ---------- 配额与工作流（P3）----------
+
+#[test]
+fn quota_spec_wire_format() {
+    let q = QuotaSpec {
+        max_memory_bytes: 512 * 1024 * 1024,
+        on_exceed: QuotaPolicy::Suspend,
+    };
+    insta::assert_json_snapshot!("quota_spec", q);
+
+    // on_exceed 缺省为 warn
+    let d: QuotaSpec = serde_json::from_value(json!({ "max_memory_bytes": 1 })).expect("de");
+    assert_eq!(d.on_exceed, QuotaPolicy::Warn);
+}
+
+#[test]
+fn wf_spec_wire_format() {
+    let spec = WfSpec {
+        name: "patrol".into(),
+        trigger: WfTrigger::Cron {
+            expr: "*/5 * * * *".into(),
+        },
+        steps: vec![WfStep {
+            method: "proc.list".into(),
+            params: json!({}),
+            retry: WfRetry {
+                max_attempts: 2,
+                backoff_ms: 100,
+            },
+        }],
+        scopes: vec!["proc:list".into()],
+    };
+    insta::assert_json_snapshot!("wf_spec", spec);
+
+    // retry / params 可缺省
+    let d: WfSpec = serde_json::from_value(json!({
+        "name": "n",
+        "trigger": { "kind": "manual" },
+        "steps": [{ "method": "proc.list" }],
+        "scopes": [],
+    }))
+    .expect("de");
+    assert_eq!(d.steps[0].retry.max_attempts, 0);
+    assert_eq!(d.trigger, WfTrigger::Manual);
+    let ev: WfTrigger =
+        serde_json::from_value(json!({ "kind": "event", "topic": "nav" })).expect("de");
+    assert_eq!(
+        ev,
+        WfTrigger::Event {
+            topic: "nav".into()
+        }
+    );
 }
 
 #[test]

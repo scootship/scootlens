@@ -1,0 +1,8 @@
+---
+source: crates/scootlens-abi/tests/contract.rs
+expression: q
+---
+{
+  "max_memory_bytes": 536870912,
+  "on_exceed": "suspend"
+}

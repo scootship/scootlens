@@ -277,6 +277,103 @@ async fn performance_budget() {
     assert!(act_ms < 50, "act {act_ms}ms exceeds 50ms budget");
 }
 
+/// P3 验收门禁：登录态 proc → snapshot → kill → restore → 会话仍有效。
+#[tokio::test]
+#[ignore = "requires chromium; run in e2e job"]
+async fn snapshot_restore_end_to_end() {
+    let stack = start_stack().await;
+    let mut ws = connect(&stack).await;
+
+    let pid = ok(&rpc(&mut ws, 1, "proc.spawn", json!({})).await)["pid"]
+        .as_str()
+        .expect("pid")
+        .to_owned();
+    // login 页脚本写入 cookie(visited=login) + localStorage(draft_user=alice)
+    ok(&rpc(
+        &mut ws,
+        2,
+        "nav.goto",
+        json!({"pid": pid, "url": stack.site.url("/login")}),
+    )
+    .await);
+
+    let snap_id = ok(&rpc(&mut ws, 3, "proc.snapshot", json!({"pid": pid})).await)["snap_id"]
+        .as_str()
+        .expect("snap_id")
+        .to_owned();
+    assert!(snap_id.starts_with("snap-"), "content-addressed: {snap_id}");
+
+    ok(&rpc(&mut ws, 4, "proc.kill", json!({"pid": pid})).await);
+
+    let restored = ok(&rpc(&mut ws, 5, "proc.restore", json!({"snap_id": snap_id})).await)["pid"]
+        .as_str()
+        .expect("pid")
+        .to_owned();
+    assert_ne!(restored, pid);
+
+    // 会话状态跟着回来：cookie 与 localStorage 均在
+    let cookie = rpc(
+        &mut ws,
+        6,
+        "state.read",
+        json!({"pid": restored, "namespace": "cookies", "key": "visited"}),
+    )
+    .await;
+    let cookie_val = &ok(&cookie)["value"];
+    assert!(
+        cookie_val["value"] == "login" || *cookie_val == json!("login"),
+        "restored cookie must survive: {cookie_val}"
+    );
+    let storage = rpc(
+        &mut ws,
+        7,
+        "state.read",
+        json!({"pid": restored, "namespace": "storage", "key": "draft_user"}),
+    )
+    .await;
+    assert_eq!(ok(&storage)["value"], "alice");
+
+    // 页面也回到 login
+    let view = rpc(&mut ws, 8, "view.snapshot", json!({"pid": restored})).await;
+    let text = ok(&view)["text"].as_str().expect("text").to_owned();
+    assert!(text.contains("Login"), "restored page:\n{text}");
+
+    ok(&rpc(&mut ws, 9, "proc.kill", json!({"pid": restored})).await);
+}
+
+/// P3 验收门禁：suspend 拒绝引擎操作、释放调度槽，resume 后可继续操作。
+#[tokio::test]
+#[ignore = "requires chromium; run in e2e job"]
+async fn suspend_resume_end_to_end() {
+    let stack = start_stack().await;
+    let mut ws = connect(&stack).await;
+
+    let pid = ok(&rpc(&mut ws, 1, "proc.spawn", json!({})).await)["pid"]
+        .as_str()
+        .expect("pid")
+        .to_owned();
+    ok(&rpc(
+        &mut ws,
+        2,
+        "nav.goto",
+        json!({"pid": pid, "url": stack.site.url("/login")}),
+    )
+    .await);
+
+    ok(&rpc(&mut ws, 3, "proc.suspend", json!({"pid": pid})).await);
+    let info = rpc(&mut ws, 4, "proc.info", json!({"pid": pid})).await;
+    assert_eq!(ok(&info)["state"], "suspended");
+    let denied = rpc(&mut ws, 5, "view.snapshot", json!({"pid": pid})).await;
+    assert_eq!(denied["error"]["data"]["code"], "E_INVALID_ARG");
+
+    ok(&rpc(&mut ws, 6, "proc.resume", json!({"pid": pid})).await);
+    let view = rpc(&mut ws, 7, "view.snapshot", json!({"pid": pid})).await;
+    let text = ok(&view)["text"].as_str().expect("text").to_owned();
+    assert!(text.contains("Login"), "resumed page still usable:\n{text}");
+
+    ok(&rpc(&mut ws, 8, "proc.kill", json!({"pid": pid})).await);
+}
+
 /// 当前测试进程的直接子进程里的 chromium 主进程。
 fn chromium_children() -> Vec<u32> {
     let my_pid = std::process::id();

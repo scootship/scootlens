@@ -498,6 +498,17 @@ async fn exhaustive_no_scope_is_denied() {
         "cond": { "url_contains": "x" },
         "timeout_ms": 50,
         "reason": "r",
+        "snap_id": "snap-0000000000000000",
+        "profile": "p1",
+        "state": { "entries": {} },
+        "name": "wf-x",
+        "spec": {
+            "name": "wf-x",
+            "trigger": { "kind": "manual" },
+            "steps": [{ "method": "sys.info" }],
+            "scopes": [],
+        },
+        "quotas": { "max_memory_bytes": 1024 },
     });
 
     for &m in method::ALL {

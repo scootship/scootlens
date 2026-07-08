@@ -60,10 +60,11 @@ impl EngineDriver for ChromiumDriver {
             screenshot: true,
             input: true,
             eval: true,
-            net_rules: false, // P2
-            state: false,     // P2
+            net_rules: false, // Fetch 拦截属后续里程碑
+            state: true,
             events: true,
-            metrics: false, // P2
+            metrics: true,
+            lifecycle: true,
         }
     }
 

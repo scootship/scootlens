@@ -1,0 +1,24 @@
+---
+source: crates/scootlens-abi/tests/contract.rs
+expression: spec
+---
+{
+  "name": "patrol",
+  "trigger": {
+    "kind": "cron",
+    "expr": "*/5 * * * *"
+  },
+  "steps": [
+    {
+      "method": "proc.list",
+      "params": {},
+      "retry": {
+        "max_attempts": 2,
+        "backoff_ms": 100
+      }
+    }
+  ],
+  "scopes": [
+    "proc:list"
+  ]
+}

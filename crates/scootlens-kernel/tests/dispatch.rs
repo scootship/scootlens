@@ -125,8 +125,8 @@ async fn unknown_method_returns_method_not_found() {
 #[tokio::test]
 async fn known_but_unimplemented_returns_unsupported() {
     let d = dispatcher();
-    // proc.suspend 属 P3
-    let resp = call(&d, "proc.suspend", json!({"pid": "p-1"})).await;
+    // obs.replay.export 属后续阶段
+    let resp = call(&d, "obs.replay.export", json!({})).await;
     let (_, code) = error_code(&resp);
     assert_eq!(code, "E_UNSUPPORTED");
 }

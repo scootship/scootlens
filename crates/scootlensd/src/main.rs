@@ -12,6 +12,9 @@ use scootlens_gateway::{Gateway, GatewayConfig};
 use scootlens_hal::EngineDriver;
 use scootlens_kernel::{Dispatcher, Kernel, KernelConfig};
 
+#[cfg(feature = "embed-console")]
+mod embedded_console;
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum Engine {
     Chromium,
@@ -38,6 +41,7 @@ struct Args {
     state_dir: Option<PathBuf>,
 
     /// Web Console 静态目录；设置后在 `/` 托管。
+    /// `embed-console` 特性构建的二进制缺省即托管嵌入版本，此参数可覆盖。
     #[arg(long)]
     console_dir: Option<PathBuf>,
 
@@ -102,7 +106,7 @@ async fn run(args: Args) -> Result<(), String> {
     let gateway = Gateway::new(
         Dispatcher::new(kernel),
         GatewayConfig {
-            console_dir: args.console_dir,
+            console_dir: args.console_dir.clone(),
         },
     );
 
@@ -112,6 +116,16 @@ async fn run(args: Args) -> Result<(), String> {
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
     tracing::info!(engine = ?args.engine, %addr, "scootlensd listening (ws endpoint: /ws)");
     println!("listening on ws://{addr}/ws");
+
+    // 嵌入式 Console：未显式指定 --console-dir 时托管编译进二进制的 console/dist
+    #[cfg(feature = "embed-console")]
+    if args.console_dir.is_none() {
+        tracing::info!("serving embedded web console at /");
+        let router = gateway.router().fallback(embedded_console::serve);
+        return axum::serve(listener, router)
+            .await
+            .map_err(|e| e.to_string());
+    }
 
     gateway.serve(listener).await.map_err(|e| e.to_string())
 }

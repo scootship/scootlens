@@ -72,4 +72,6 @@ v0 单管理员令牌足够。
   `session` / `replay` / `connect`），Vitest 单测覆盖 ≥80%（CI 门禁 #11）；Svelte 组件仅做展示；
   **Playwright UI e2e**（CI 门禁 #12）以 `scootlensd --engine mock` 全栈驱动关键路径：
   连接/spawn/screencast/接管挂起-恢复/审批闭环/journal 完整性/回放验链/设置动作
-- **分发**：`npm run build` 产出 `console/dist/`，由 `scootlensd --console-dir console/dist` 静态托管于 `/`（`tower-http` ServeDir）
+- **分发**：`npm run build` 产出 `console/dist/`，由 `scootlensd --console-dir console/dist` 静态托管于 `/`（`tower-http` ServeDir）；
+  或以 `cargo build -p scootlensd --features embed-console` 把 `dist/` 编译进二进制
+  （`include_dir`，单文件分发，无需外部静态目录；`--console-dir` 仍可覆盖）

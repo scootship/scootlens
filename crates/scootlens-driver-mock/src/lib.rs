@@ -541,6 +541,19 @@ impl EngineHandle for MockHandle {
             InputAction::Press { .. } | InputAction::Scroll { .. } => Ok(ActResult {
                 nav_occurred: false,
             }),
+            InputAction::ClickAt { x_ratio, y_ratio } => {
+                // mock 无几何/坐标模型，无法判定命中哪个节点；对齐 Press/Scroll，
+                // 校验通过后语义性 no-op（真实点击行为由 chromium conformance 覆盖）。
+                if !(0.0..=1.0).contains(x_ratio) || !(0.0..=1.0).contains(y_ratio) {
+                    return Err(AbiError::new(
+                        ErrorCode::InvalidArg,
+                        "x_ratio/y_ratio must be within [0, 1]",
+                    ));
+                }
+                Ok(ActResult {
+                    nav_occurred: false,
+                })
+            }
         }
     }
 

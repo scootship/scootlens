@@ -14,3 +14,4 @@
 | [0007](0007-token-wire-format.md) | Capability 令牌 wire 格式采用 `slt1.<claims>.<sig>` | Accepted |
 | [0008](0008-p3-os-semantics-abi.md) | P3 OS 语义 ABI 面（suspend/snapshot/quota/wf） | Accepted |
 | [0009](0009-p4-takeover-replay-mcp.md) | P4 ABI 增量 — 人工接管、回放导出与 MCP 投影落地 | Accepted |
+| [0010](0010-takeover-point-click.md) | 接管期间坐标点击（`act.point.click`） | Accepted |

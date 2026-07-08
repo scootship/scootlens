@@ -509,6 +509,8 @@ async fn exhaustive_no_scope_is_denied() {
             "scopes": [],
         },
         "quotas": { "max_memory_bytes": 1024 },
+        "x_ratio": 0.5,
+        "y_ratio": 0.5,
     });
 
     for &m in method::ALL {

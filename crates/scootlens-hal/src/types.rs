@@ -153,6 +153,13 @@ pub enum InputAction {
         target: ElementRef,
         paths: Vec<PathBuf>,
     },
+    /// 接管期间坐标点击（ADR-0010）：归一化视口坐标 `[0,1]`，无 `ElementRef`、
+    /// 无 generation 过期保护。内核层强制"仅当调用者是当前 pid 的接管 holder"，
+    /// 驱动层只负责按自身当前视口把比例换算为像素后单击。
+    ClickAt {
+        x_ratio: f64,
+        y_ratio: f64,
+    },
 }
 
 /// 动作结果。

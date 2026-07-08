@@ -38,6 +38,10 @@ methods! {
     ACT_UPLOAD = "act.upload";
     ACT_TAKEOVER_START = "act.takeover.start";
     ACT_TAKEOVER_END = "act.takeover.end";
+    /// 接管期间坐标点击（ADR-0010）：仅当调用者是当前 pid 的接管 holder 时可用，
+    /// 否则 `E_CAP_DENIED`；不经 takeover_gate 挂起队列（坐标动作无 ref/generation
+    /// 过期保护，不能被排队到未来不确定的页面状态下执行）。
+    ACT_POINT_CLICK = "act.point.click";
     // dom / js
     DOM_EXTRACT = "dom.extract";
     JS_EXEC = "js.exec";

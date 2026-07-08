@@ -25,6 +25,7 @@ expression: "method::ALL"
   "act.upload",
   "act.takeover.start",
   "act.takeover.end",
+  "act.point.click",
   "dom.extract",
   "js.exec",
   "evt.wait",

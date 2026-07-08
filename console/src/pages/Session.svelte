@@ -6,6 +6,8 @@
     acceptsText,
     screencastInterval,
     takeoverView,
+    containRect,
+    clickRatio,
     type SnapshotElement,
     type TakeoverView,
   } from "../lib/session";
@@ -21,6 +23,8 @@
   let gotoUrl = $state("");
   let error = $state<string | null>(null);
   let live = $state(true);
+  let spawnProfile = $state("");
+  let spawning = $state(false);
 
   const view = $derived<TakeoverView>(takeoverView(holder, self));
   const procState = $derived(procs.find((p) => p.pid === pid)?.state ?? null);
@@ -31,6 +35,22 @@
       if (!pid && procs.length > 0) pid = procs[0].pid;
     } catch (e) {
       error = message(e);
+    }
+  }
+
+  /** 用指定 profile 新开会话：spawn 时预加载该 profile 的登录态（cookie），
+   *  随后即可导航 + 接管，带登录态操作。profile 留空则默认空白会话。 */
+  async function spawnWithProfile() {
+    spawning = true;
+    try {
+      const newPid = await api.procSpawn(spawnProfile.trim() || undefined);
+      await refreshProcs();
+      pid = newPid;
+      error = null;
+    } catch (e) {
+      error = message(e);
+    } finally {
+      spawning = false;
     }
   }
 
@@ -90,6 +110,22 @@
     }
   }
 
+  /** 直接点击画面（仅接管中生效）：把点击偏移换算成归一化坐标 → act.point.click。 */
+  async function pointClick(ev: MouseEvent) {
+    if (view.kind !== "held-by-me") return;
+    const img = ev.currentTarget as HTMLImageElement;
+    const box = containRect(img.naturalWidth, img.naturalHeight, img.clientWidth, img.clientHeight);
+    const ratio = box ? clickRatio(ev.offsetX, ev.offsetY, box) : null;
+    if (!ratio) return;
+    try {
+      await api.actClickAt(pid, ratio.xRatio, ratio.yRatio);
+      error = null;
+      await Promise.all([captureFrame(), refreshSnapshot()]);
+    } catch (e) {
+      error = message(e);
+    }
+  }
+
   async function pressEnter() {
     try {
       await api.actPress(pid, "Enter");
@@ -136,6 +172,15 @@
 
 <div class="section-head">
   <h2>Session</h2>
+  <input
+    class="profile-in"
+    placeholder="profile（登录态）"
+    bind:value={spawnProfile}
+    data-testid="spawn-profile"
+  />
+  <button class="primary" onclick={spawnWithProfile} disabled={spawning} data-testid="spawn-with-profile">
+    {spawning ? "启动中…" : "新开会话"}
+  </button>
   <select bind:value={pid} data-testid="session-pid">
     {#each procs as p (p.pid)}
       <option value={p.pid}>{p.pid} · {p.state}</option>
@@ -160,13 +205,31 @@
 {/if}
 
 {#if !pid}
-  <div class="empty">无进程可查看。先在 Dashboard 里 Spawn 一个。</div>
+  <div class="empty">无进程可查看。上方填 profile 名点「新开会话」，或在 Dashboard 里 Spawn。</div>
 {:else}
   <div class="split">
     <div class="card viewport">
-      <h3>实时画面 <small class="muted">view.screenshot @2fps</small></h3>
+      <h3>
+        实时画面 <small class="muted">view.screenshot @2fps</small>
+        {#if view.kind === "held-by-me"}
+          <small class="muted">· 接管中，可直接点击画面</small>
+        {/if}
+      </h3>
       {#if frame}
-        <img src={frame} alt="screencast frame" data-testid="screencast" />
+        <!--
+          画面点击是坐标/指针交互，没有有意义的键盘等价物（一次按键无法表达
+          "点在这个像素"）；键盘可达的等价路径始终保留在下方"输入注入"面板
+          （语义元素清单 → Click/Type 按钮）。
+        -->
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <img
+          src={frame}
+          alt="screencast frame"
+          data-testid="screencast"
+          class:interactive={view.kind === "held-by-me"}
+          onclick={pointClick}
+        />
       {:else}
         <div class="empty">等待帧…（挂起/终止的进程无画面）</div>
       {/if}

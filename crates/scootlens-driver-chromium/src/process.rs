@@ -35,7 +35,11 @@ impl BrowserProcess {
             .arg("--disable-extensions")
             .arg("--disable-sync")
             .arg("--mute-audio")
-            .arg("--window-size=1280,800");
+            .arg(format!(
+                "--window-size={},{}",
+                crate::handle::VIEWPORT_WIDTH,
+                crate::handle::VIEWPORT_HEIGHT
+            ));
         // CI 容器等环境的附加启动参数（如 --no-sandbox），空白分隔。
         if let Ok(extra) = std::env::var("SCOOTLENS_CHROMIUM_EXTRA_ARGS") {
             for a in extra.split_whitespace() {

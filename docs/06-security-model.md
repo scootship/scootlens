@@ -52,6 +52,21 @@ slt1.<base64url(claims_json)>.<base64url(ed25519_sig)>
 
 审批流：调用挂起 → Console 弹审批卡（主体/作用域/参数摘要/页面截图）→ 批准（可记忆为规则）/拒绝。
 
+### 态前提门（非作用域）：`act.point.click`
+
+不是所有风险收紧都靠作用域审批。`act.point.click`（接管期间坐标点击，见
+[ADR-0010](adr/0010-takeover-point-click.md)）复用普通的 `act@<origin>` 作用域，但内核在
+执行前额外校验一条**运行时状态前提**：调用者必须是该 pid **当前**接管的 holder，
+否则 `E_CAP_DENIED`——这条检查不属于 capability 模型（不看作用域覆盖，看
+`takeover` 状态表），因此没有把它做成新的 sensitive scope（那样会导致接管期间
+每次点击都要人工审批，违背"人工接管应当顺滑"的设计目标；holder 身份本身已经在
+取得 `act:takeover` 时过了一次审批关卡）。
+
+这条门还有一处刻意的不一致：非 holder 的调用**立即拒绝**，不像其余 `act.*` 那样
+经 `takeover_gate` 挂起排队等接管结束后恢复。原因是坐标点击没有 `ref`/generation
+过期保护——ref 寻址的动作排队到接管结束后重放仍然安全（页面变了 ref 就会
+`E_REF_STALE`），坐标点击排队重放则可能在完全不同的页面状态下盲打一个像素坐标。
+
 ## 威胁模型与对策
 
 | # | 风险 | 载体 | 对策 |

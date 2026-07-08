@@ -12,7 +12,7 @@ mod abi_client;
 mod projection;
 mod server;
 
-pub use abi_client::{AbiClient, CallError};
+pub use abi_client::{AbiClient, CallError, KeepaliveConfig};
 pub use projection::{
     EXCLUDED_METHODS, ToolDef, input_schema, method_for_tool, tool_defs, tool_name,
 };

@@ -284,3 +284,78 @@ async fn kill_roundtrip_over_ws() {
     .expect("kill must not hang");
     assert_eq!(resp["result"]["ok"], true);
 }
+
+/// 起一个自定义保活参数的 gateway（复用 start() 的 kernel/令牌逻辑）。
+async fn start_with_keepalive(ping_ms: u64, idle_ms: u64) -> (String, String) {
+    let kernel = Kernel::new(
+        Arc::new(MockDriver::standard_fixture()),
+        KernelConfig::default(),
+    );
+    let mut constraints = TokenConstraints::default();
+    constraints.approval.insert("*".into(), ApprovalMode::Auto);
+    let token = kernel.security().issue(&TokenClaims {
+        subject: "user:test".into(),
+        scopes: vec!["*".parse().expect("scope")],
+        constraints,
+        issued_by: "test".into(),
+        issued_at: 0,
+    });
+    let gw = Gateway::new(
+        Dispatcher::new(kernel),
+        GatewayConfig {
+            ws_ping_interval: std::time::Duration::from_millis(ping_ms),
+            ws_idle_timeout: std::time::Duration::from_millis(idle_ms),
+            ..GatewayConfig::default()
+        },
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move { gw.serve(listener).await });
+    (format!("ws://{addr}/ws"), token)
+}
+
+/// 服务端保活：持续被轮询的健康客户端（自动回 Pong）跨越多个空闲窗口仍可用。
+#[tokio::test]
+async fn keepalive_healthy_client_survives_idle_windows() {
+    let (base, token) = start_with_keepalive(30, 120).await;
+    let mut ws = connect(&base, &token).await;
+    // 静置若干个 idle_timeout 窗口：期间只应收到服务端 Ping（轮询即自动回 Pong），无数据帧
+    let idle_until = tokio::time::Instant::now() + std::time::Duration::from_millis(400);
+    loop {
+        match tokio::time::timeout_at(idle_until, ws.next()).await {
+            Err(_) => break, // 静置窗口结束
+            Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => continue,
+            Ok(other) => panic!("unexpected frame while idle: {other:?}"),
+        }
+    }
+    let resp = rpc(&mut ws, 1, "proc.spawn", json!({})).await;
+    assert!(
+        resp["result"]["pid"].is_string(),
+        "healthy idle connection must stay usable: {resp}"
+    );
+}
+
+/// 服务端保活：入站静默超过 idle_timeout 的连接被服务端关闭（半开链路回收）。
+#[tokio::test]
+async fn keepalive_closes_unresponsive_connection() {
+    let (base, token) = start_with_keepalive(30, 120).await;
+    let mut ws = connect(&base, &token).await;
+    // 不轮询 WS（无自动 Pong），只观察底层 TCP：服务端应在 idle_timeout 后主动关闭
+    use tokio::io::AsyncReadExt;
+    let tokio_tungstenite::MaybeTlsStream::Plain(stream) = ws.get_mut() else {
+        panic!("expected plain tcp stream");
+    };
+    let mut buf = [0u8; 4096];
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let n = tokio::time::timeout_at(deadline, stream.read(&mut buf))
+            .await
+            .expect("server must close unresponsive connection within deadline")
+            .unwrap_or(0);
+        if n == 0 {
+            break; // EOF：服务端回收了死连接
+        }
+    }
+}

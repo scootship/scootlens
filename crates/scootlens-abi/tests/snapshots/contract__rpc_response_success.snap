@@ -1,0 +1,11 @@
+---
+source: crates/scootlens-abi/tests/contract.rs
+expression: ok
+---
+{
+  "jsonrpc": "2.0",
+  "id": "req-1",
+  "result": {
+    "pid": "p-x1"
+  }
+}

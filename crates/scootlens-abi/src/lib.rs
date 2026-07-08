@@ -1,0 +1,18 @@
+//! # scootlens-abi
+//!
+//! ScootLens ABI 协议真源：ID 类型、错误码、JSON-RPC 2.0 封装、系统调用方法表。
+//! 规范见 `docs/03-abi-spec.md`；任何变更需先改契约测试并附 ADR。
+//!
+//! 本 crate 零内部依赖（依赖规则见 `docs/02-architecture.md`）。
+
+mod error;
+mod id;
+pub mod method;
+mod rpc;
+
+pub use error::{AbiError, ErrorCode, RpcError};
+pub use id::{ElementRef, Pid};
+pub use rpc::{RpcId, RpcNotification, RpcRequest, RpcResponse};
+
+/// ABI 版本。v0 期间允许破坏性变更（需 ADR）；v1 起向后兼容。
+pub const ABI_VERSION: &str = "0.1.0";

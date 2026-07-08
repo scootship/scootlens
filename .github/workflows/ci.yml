@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # 门禁 1-2：格式 + 静态分析
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # 门禁 3：全量测试（含 insta 契约快照，缺失/漂移即失败）
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    env:
+      INSTA_UPDATE: "no"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --workspace
+
+  # 门禁 4：覆盖率 ≥ 80%（行覆盖，workspace 级）
+  coverage:
+    name: coverage >= 80%
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: cargo llvm-cov
+        run: cargo llvm-cov --workspace --fail-under-lines 80
+
+  # 门禁 5：依赖审计（advisories / licenses / bans / sources）
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  # 门禁 6：泄密扫描（全历史）
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 门禁 7：unsafe 白名单（当前全 workspace forbid；出现 unsafe 必须走 ADR）
+  unsafe-check:
+    name: unsafe audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: forbid(unsafe_code) declared in workspace lints
+        run: grep -q 'unsafe_code = "forbid"' Cargo.toml
+      - name: no unsafe blocks in crates/
+        run: |
+          if grep -rn --include='*.rs' -E '\bunsafe\b' crates/; then
+            echo '::error::unsafe 代码需 ADR 批准并显式豁免（见 docs/08-engineering.md）'
+            exit 1
+          fi
+
+  # 门禁 10：ABI 变更联动（abi crate 或 03-abi-spec.md 改动必须同时出现）
+  abi-adr-sync:
+    name: ABI spec sync
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: check abi crate and spec change together
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          CHANGED=$(git diff --name-only "$BASE"...HEAD)
+          echo "$CHANGED"
+          ABI_CODE=$(echo "$CHANGED" | grep -c '^crates/scootlens-abi/src/' || true)
+          ABI_SPEC=$(echo "$CHANGED" | grep -c '^docs/03-abi-spec.md' || true)
+          if [ "$ABI_CODE" -gt 0 ] && [ "$ABI_SPEC" -eq 0 ]; then
+            echo '::error::修改了 scootlens-abi 实现但未更新 docs/03-abi-spec.md（协议真源联动，见 docs/08-engineering.md 门禁#10）'
+            exit 1
+          fi
+
+  # 门禁 8（e2e smoke）与 9（性能基准）自 P1 引入真实引擎后启用。

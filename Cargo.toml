@@ -1,0 +1,57 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/scootlens-abi",
+    "crates/scootlens-hal",
+    "crates/scootlens-kernel",
+    "crates/scootlens-driver-mock",
+    "crates/scootlens-driver-chromium",
+    "crates/scootlens-net",
+    "crates/scootlens-gateway",
+    "crates/scootlens-mcp",
+    "crates/scootlensd",
+    "crates/scootctl",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/jamiesun/ScootLens"
+publish = false
+
+[workspace.dependencies]
+# 内部 crate（依赖规则见 docs/02-architecture.md）
+scootlens-abi = { path = "crates/scootlens-abi" }
+scootlens-hal = { path = "crates/scootlens-hal" }
+scootlens-kernel = { path = "crates/scootlens-kernel" }
+scootlens-driver-mock = { path = "crates/scootlens-driver-mock" }
+scootlens-driver-chromium = { path = "crates/scootlens-driver-chromium" }
+scootlens-net = { path = "crates/scootlens-net" }
+scootlens-gateway = { path = "crates/scootlens-gateway" }
+scootlens-mcp = { path = "crates/scootlens-mcp" }
+
+# 三方依赖统一版本
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+async-trait = "0.1"
+url = { version = "2", features = ["serde"] }
+tracing = "0.1"
+
+# 测试
+insta = { version = "1", features = ["json"] }
+tokio-test = "0.4"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

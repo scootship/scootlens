@@ -1,0 +1,15 @@
+[package]
+name = "scootctl"
+description = "ScootLens CLI 客户端"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+scootlens-abi.workspace = true

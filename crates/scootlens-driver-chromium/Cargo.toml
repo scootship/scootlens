@@ -1,0 +1,16 @@
+[package]
+name = "scootlens-driver-chromium"
+description = "Chromium 引擎驱动：外部进程 CDP（P1 实现，见 ADR-0002）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+scootlens-abi.workspace = true
+scootlens-hal.workspace = true

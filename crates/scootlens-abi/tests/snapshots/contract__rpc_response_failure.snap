@@ -1,0 +1,15 @@
+---
+source: crates/scootlens-abi/tests/contract.rs
+expression: fail
+---
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "error": {
+    "code": -32001,
+    "message": "missing scope act@example.com",
+    "data": {
+      "code": "E_CAP_DENIED"
+    }
+  }
+}

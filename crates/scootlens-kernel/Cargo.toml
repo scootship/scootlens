@@ -1,0 +1,17 @@
+[package]
+name = "scootlens-kernel"
+description = "ScootLens 内核：进程/调度/VFS/事件/安全/观测（P1 起实现）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+scootlens-abi.workspace = true
+scootlens-hal.workspace = true
+scootlens-net.workspace = true

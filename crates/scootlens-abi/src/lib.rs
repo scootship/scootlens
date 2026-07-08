@@ -12,7 +12,7 @@ mod rpc;
 
 pub use error::{AbiError, ErrorCode, RpcError};
 pub use id::{ElementRef, Pid};
-pub use rpc::{RpcId, RpcNotification, RpcRequest, RpcResponse};
+pub use rpc::{RpcId, RpcNotification, RpcOutcome, RpcRequest, RpcResponse, V2};
 
 /// ABI 版本。v0 期间允许破坏性变更（需 ADR）；v1 起向后兼容。
 pub const ABI_VERSION: &str = "0.1.0";

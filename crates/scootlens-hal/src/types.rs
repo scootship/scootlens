@@ -27,6 +27,14 @@ pub struct NavResult {
     pub title: String,
 }
 
+/// 历史移动方向（nav.back / nav.forward）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryDir {
+    Back,
+    Forward,
+}
+
 /// 语义快照选项。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SnapshotOpts {

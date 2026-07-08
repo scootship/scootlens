@@ -1,6 +1,6 @@
 [package]
-name = "scootctl"
-description = "ScootLens CLI 客户端"
+name = "scootlens-test-support"
+description = "测试基建：fixtures 静态站点服务器（仅测试/e2e 使用，不进产品依赖图）"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,10 +12,5 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-scootlens-abi.workspace = true
-base64.workspace = true
-clap.workspace = true
-futures-util.workspace = true
-serde_json.workspace = true
+axum.workspace = true
 tokio.workspace = true
-tokio-tungstenite.workspace = true

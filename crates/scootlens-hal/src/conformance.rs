@@ -19,7 +19,9 @@
 use scootlens_abi::ErrorCode;
 use url::Url;
 
-use crate::{EngineDriver, EngineHandle, InputAction, ProfileSpec, SnapshotOpts, StateBundle};
+use crate::{
+    EngineDriver, EngineHandle, HistoryDir, InputAction, ProfileSpec, SnapshotOpts, StateBundle,
+};
 
 /// 一致性测试目标：驱动 + 标准 fixture 站点基地址。
 pub struct Target {
@@ -183,6 +185,25 @@ pub async fn state_roundtrip_or_unsupported(t: &Target) {
     }
 }
 
+/// history back/forward 与 reload 语义。
+pub async fn history_and_reload_work(t: &Target) {
+    let h = t.spawn().await;
+    h.navigate(&t.url("/")).await.expect("nav home");
+    h.navigate(&t.url("/login")).await.expect("nav login");
+
+    let back = h.history(HistoryDir::Back).await.expect("back");
+    assert_eq!(back.url, t.url("/"));
+    let fwd = h.history(HistoryDir::Forward).await.expect("forward");
+    assert_eq!(fwd.url, t.url("/login"));
+    // 历史耗尽：no-op，停留当前页
+    let fwd2 = h.history(HistoryDir::Forward).await.expect("forward eol");
+    assert_eq!(fwd2.url, t.url("/login"));
+
+    let re = h.reload().await.expect("reload");
+    assert_eq!(re.url, t.url("/login"));
+    assert_eq!(re.title, "Login");
+}
+
 /// 注册全部一致性测试为 `#[tokio::test]`。
 ///
 /// 参数为返回 `Target` 的异步工厂闭包表达式；每个测试独立创建 Target。
@@ -238,6 +259,12 @@ macro_rules! conformance_run_all {
             async fn state_roundtrip_or_unsupported() {
                 let t = ($factory)().await;
                 $crate::conformance::state_roundtrip_or_unsupported(&t).await;
+            }
+
+            #[tokio::test]
+            async fn history_and_reload_work() {
+                let t = ($factory)().await;
+                $crate::conformance::history_and_reload_work(&t).await;
             }
         }
     };

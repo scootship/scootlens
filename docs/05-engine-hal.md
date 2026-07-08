@@ -29,7 +29,7 @@ pub trait EngineHandle: Send + Sync {
     async fn import_state(&self, bundle: &StateBundle) -> Result<()>;
     fn events(&self) -> EventStream;             // 引擎事件 → Event Bus
     async fn metrics(&self) -> Result<EngineMetrics>; // 内存/CPU，供 Scheduler
-    async fn shutdown(self: Box<Self>) -> Result<()>;
+    async fn shutdown(&self) -> Result<()>;   // 幂等；Arc 共享下由内核调用
 }
 ```
 

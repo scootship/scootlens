@@ -7,8 +7,8 @@ use tokio::sync::broadcast;
 use url::Url;
 
 use crate::types::{
-    A11ySnapshot, ActResult, EngineCaps, EngineEvent, EngineMetrics, InputAction, NavResult,
-    ProfileSpec, SnapshotOpts, StateBundle,
+    A11ySnapshot, ActResult, EngineCaps, EngineEvent, EngineMetrics, HistoryDir, InputAction,
+    NavResult, ProfileSpec, SnapshotOpts, StateBundle,
 };
 
 /// HAL 统一结果类型：错误即 ABI 错误（单一错误分类学）。
@@ -35,6 +35,12 @@ pub trait EngineHandle: Send + Sync {
     /// 当前页信息。
     async fn page_info(&self) -> HalResult<NavResult>;
 
+    /// 历史移动（back/forward）。历史耗尽时为 no-op，返回当前页。
+    async fn history(&self, dir: HistoryDir) -> HalResult<NavResult>;
+
+    /// 重新加载当前页。
+    async fn reload(&self) -> HalResult<NavResult>;
+
     /// 语义快照：每次调用快照代数 +1，旧代 ref 立即过期。
     async fn snapshot(&self, opts: &SnapshotOpts) -> HalResult<A11ySnapshot>;
 
@@ -54,5 +60,6 @@ pub trait EngineHandle: Send + Sync {
 
     async fn metrics(&self) -> HalResult<EngineMetrics>;
 
-    async fn shutdown(self: Box<Self>) -> HalResult<()>;
+    /// 关闭引擎实例（幂等；关闭后句柄不再可用）。
+    async fn shutdown(&self) -> HalResult<()>;
 }

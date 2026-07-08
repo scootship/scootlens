@@ -11,13 +11,14 @@
 mod model;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use scootlens_abi::{AbiError, ElementRef, ErrorCode};
 use scootlens_hal::{
     A11ySnapshot, ActResult, EngineCaps, EngineDriver, EngineEvent, EngineHandle, EngineMetrics,
-    HalResult, InputAction, NavResult, ProfileSpec, SnapshotOpts, StateBundle,
+    HalResult, HistoryDir, InputAction, NavResult, ProfileSpec, SnapshotOpts, StateBundle,
 };
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -34,6 +35,8 @@ pub fn fixture_base() -> Url {
 pub struct MockDriver {
     site: Arc<SiteModel>,
     caps: EngineCaps,
+    /// 已 spawn 实例的崩溃注入端口（按 spawn 顺序）。
+    ports: Mutex<Vec<Arc<CrashPort>>>,
 }
 
 impl MockDriver {
@@ -50,6 +53,7 @@ impl MockDriver {
                 events: true,
                 metrics: true,
             },
+            ports: Mutex::new(Vec::new()),
         }
     }
 
@@ -61,7 +65,34 @@ impl MockDriver {
 
     /// 以具体类型 spawn（测试用：故障注入 / eval 编程需要 `MockHandle` 方法）。
     pub fn spawn_mock(&self, _profile: &ProfileSpec) -> MockHandle {
-        MockHandle::new(Arc::clone(&self.site), self.caps)
+        let h = MockHandle::new(Arc::clone(&self.site), self.caps);
+        self.register(&h);
+        h
+    }
+
+    /// 对第 `index` 个 spawn 出的实例注入崩溃（存在返回 true）。
+    ///
+    /// 供 kernel 崩溃监督测试：kernel 只持 `Box<dyn EngineHandle>`，
+    /// 由 driver 侧触发崩溃事件。
+    pub fn crash_spawned(&self, index: usize) -> bool {
+        let ports = self
+            .ports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match ports.get(index) {
+            Some(p) => {
+                p.crash();
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn register(&self, h: &MockHandle) {
+        self.ports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(Arc::clone(&h.port));
     }
 
     /// 内建标准 fixture 站点（conformance 语义）。
@@ -101,12 +132,17 @@ impl EngineDriver for MockDriver {
     }
 
     async fn spawn(&self, _profile: &ProfileSpec) -> HalResult<Box<dyn EngineHandle>> {
-        Ok(Box::new(MockHandle::new(Arc::clone(&self.site), self.caps)))
+        let h = MockHandle::new(Arc::clone(&self.site), self.caps);
+        self.register(&h);
+        Ok(Box::new(h))
     }
 }
 
 struct HandleState {
     current: Url,
+    /// 导航历史（含当前页）与游标。
+    history: Vec<Url>,
+    cursor: usize,
     generation: u64,
     /// 当前代数下 ref index → 节点路径。
     ref_paths: HashMap<u64, Vec<usize>>,
@@ -114,7 +150,23 @@ struct HandleState {
     values: HashMap<(Url, Vec<usize>), String>,
     state_store: StateBundle,
     eval_responses: HashMap<String, Value>,
-    crashed: bool,
+}
+
+/// 崩溃注入端口：driver 与 handle 共享。
+struct CrashPort {
+    crashed: AtomicBool,
+    events: broadcast::Sender<EngineEvent>,
+}
+
+impl CrashPort {
+    fn crash(&self) {
+        self.crashed.store(true, Ordering::SeqCst);
+        let _ = self.events.send(EngineEvent::Crashed);
+    }
+
+    fn is_crashed(&self) -> bool {
+        self.crashed.load(Ordering::SeqCst)
+    }
 }
 
 /// Mock 引擎实例。除 HAL 接口外提供故障注入与 eval 编程接口。
@@ -122,7 +174,7 @@ pub struct MockHandle {
     site: Arc<SiteModel>,
     caps: EngineCaps,
     state: Mutex<HandleState>,
-    events: broadcast::Sender<EngineEvent>,
+    port: Arc<CrashPort>,
 }
 
 impl MockHandle {
@@ -133,22 +185,25 @@ impl MockHandle {
             site,
             caps,
             state: Mutex::new(HandleState {
-                current: blank,
+                current: blank.clone(),
+                history: vec![blank],
+                cursor: 0,
                 generation: 0,
                 ref_paths: HashMap::new(),
                 values: HashMap::new(),
                 state_store: StateBundle::default(),
                 eval_responses: HashMap::new(),
-                crashed: false,
             }),
-            events,
+            port: Arc::new(CrashPort {
+                crashed: AtomicBool::new(false),
+                events,
+            }),
         }
     }
 
     /// 故障注入：进入崩溃态，后续调用返回 E_ENGINE_CRASH 并广播 Crashed 事件。
     pub fn inject_crash(&self) {
-        self.lock().crashed = true;
-        let _ = self.events.send(EngineEvent::Crashed);
+        self.port.crash();
     }
 
     /// 注册 js.exec 脚本响应（未注册脚本返回 Null）。
@@ -163,7 +218,7 @@ impl MockHandle {
     }
 
     fn ensure_alive(&self) -> HalResult<()> {
-        if self.lock().crashed {
+        if self.port.is_crashed() {
             Err(AbiError::new(ErrorCode::EngineCrash, "mock engine crashed"))
         } else {
             Ok(())
@@ -174,13 +229,41 @@ impl MockHandle {
         let page = self.site.resolve(url);
         let mut st = self.lock();
         st.current = url.clone();
+        let cut = st.cursor + 1;
+        st.history.truncate(cut);
+        st.history.push(url.clone());
+        st.cursor = st.history.len() - 1;
         st.ref_paths.clear();
         drop(st);
         let _ = self
+            .port
             .events
             .send(EngineEvent::Navigated { url: url.clone() });
         NavResult {
             url: url.clone(),
+            title: page.title.clone(),
+        }
+    }
+
+    /// 设置当前页为历史中 cursor 指向的 URL（back/forward 用，不清剪历史）。
+    fn move_history(&self, dir: HistoryDir) -> NavResult {
+        let mut st = self.lock();
+        match dir {
+            HistoryDir::Back if st.cursor > 0 => st.cursor -= 1,
+            HistoryDir::Forward if st.cursor + 1 < st.history.len() => st.cursor += 1,
+            _ => {}
+        }
+        st.current = st.history[st.cursor].clone();
+        st.ref_paths.clear();
+        let url = st.current.clone();
+        let page = self.site.resolve(&url);
+        drop(st);
+        let _ = self
+            .port
+            .events
+            .send(EngineEvent::Navigated { url: url.clone() });
+        NavResult {
+            url,
             title: page.title.clone(),
         }
     }
@@ -199,6 +282,29 @@ impl EngineHandle for MockHandle {
         let page = self.site.resolve(&st.current);
         Ok(NavResult {
             url: st.current.clone(),
+            title: page.title.clone(),
+        })
+    }
+
+    async fn history(&self, dir: HistoryDir) -> HalResult<NavResult> {
+        self.ensure_alive()?;
+        Ok(self.move_history(dir))
+    }
+
+    async fn reload(&self) -> HalResult<NavResult> {
+        self.ensure_alive()?;
+        let (url, page) = {
+            let mut st = self.lock();
+            st.ref_paths.clear();
+            let url = st.current.clone();
+            (url.clone(), self.site.resolve(&url))
+        };
+        let _ = self
+            .port
+            .events
+            .send(EngineEvent::Navigated { url: url.clone() });
+        Ok(NavResult {
+            url,
             title: page.title.clone(),
         })
     }
@@ -328,7 +434,7 @@ impl EngineHandle for MockHandle {
     }
 
     fn events(&self) -> broadcast::Receiver<EngineEvent> {
-        self.events.subscribe()
+        self.port.events.subscribe()
     }
 
     async fn metrics(&self) -> HalResult<EngineMetrics> {
@@ -338,7 +444,7 @@ impl EngineHandle for MockHandle {
         })
     }
 
-    async fn shutdown(self: Box<Self>) -> HalResult<()> {
+    async fn shutdown(&self) -> HalResult<()> {
         Ok(())
     }
 }

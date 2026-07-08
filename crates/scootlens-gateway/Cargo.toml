@@ -13,4 +13,15 @@ workspace = true
 
 [dependencies]
 scootlens-abi.workspace = true
+scootlens-hal.workspace = true
 scootlens-kernel.workspace = true
+axum.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+scootlens-driver-mock.workspace = true
+tokio-tungstenite.workspace = true

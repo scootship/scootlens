@@ -11,6 +11,6 @@ mod types;
 
 pub use driver::{EngineDriver, EngineHandle, HalResult};
 pub use types::{
-    A11yNode, A11ySnapshot, ActResult, EngineCaps, EngineEvent, EngineMetrics, InputAction,
-    NavResult, ProfileSpec, SnapshotOpts, StateBundle,
+    A11yNode, A11ySnapshot, ActResult, EngineCaps, EngineEvent, EngineMetrics, HistoryDir,
+    InputAction, NavResult, ProfileSpec, SnapshotOpts, StateBundle,
 };

@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { ConsoleApi, PendingApproval, ApprovalDecision } from "../lib/api";
   import { scopeLabel, formatTs, shortId } from "../lib/format";
+  import { friendlyError } from "../lib/errors";
 
   let { api, pulse }: { api: ConsoleApi; pulse: number } = $props();
 
@@ -13,7 +14,7 @@
     try {
       items = await api.pending();
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = friendlyError(e);
     }
   }
 
@@ -24,7 +25,7 @@
       await api.approve(id, decision, remember);
       await load();
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = friendlyError(e);
     } finally {
       busy = null;
     }
@@ -37,9 +38,9 @@
 </script>
 
 <div class="section-head">
-  <h2>Approvals</h2>
   <span class="pill"><span class="led"></span>{items.length} 待审</span>
-  <button class="primary" onclick={load}>刷新</button>
+  <span class="spacer"></span>
+  <button class="ghost" onclick={load}>刷新</button>
 </div>
 
 {#if error}

@@ -71,10 +71,12 @@ export type StateHandler = (state: ConnState) => void;
 const defaultFactory: SocketFactory = (url) =>
   new WebSocket(url) as unknown as SocketLike;
 
-/** 用 slt1 令牌构造握手 URL：`<base>/ws?token=<token>`。 */
+/** 用 slt1 令牌构造握手 URL：`<base>/ws?token=<token>`；
+ *  token 为空 = cookie 会话握手（登录后浏览器自动携带 HttpOnly cookie）。 */
 export function handshakeUrl(base: string, token: string): string {
   const sep = base.endsWith("/") ? "" : "/";
-  return `${base}${sep}ws?token=${encodeURIComponent(token)}`;
+  const t = token.trim();
+  return t ? `${base}${sep}ws?token=${encodeURIComponent(t)}` : `${base}${sep}ws`;
 }
 
 export class RpcClient {

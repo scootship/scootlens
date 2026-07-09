@@ -8,7 +8,7 @@ use clap::{Parser, ValueEnum};
 use scootlens_abi::{ApprovalMode, TokenClaims, TokenConstraints};
 use scootlens_driver_chromium::ChromiumDriver;
 use scootlens_driver_mock::MockDriver;
-use scootlens_gateway::{Gateway, GatewayConfig};
+use scootlens_gateway::{AuthConfig, Gateway, GatewayConfig, MicrosoftConfig, PasswordConfig};
 use scootlens_hal::EngineDriver;
 use scootlens_kernel::{Dispatcher, Kernel, KernelConfig};
 
@@ -54,6 +54,50 @@ struct Args {
     /// 审批策略取默认（敏感作用域 = 人工审批）；令牌仅打印一次，不落盘。
     #[arg(long = "issue", value_name = "SUBJECT=SCOPES")]
     issue: Vec<String>,
+
+    // ---------- Console 登录（会话 cookie；替代把 admin 令牌贴进 URL） ----------
+    /// Console 密码登录的用户名。
+    #[arg(long, default_value = "admin")]
+    admin_user: String,
+
+    /// Console 密码登录的密码（明文，经环境变量传入；启动即摘要，不驻留明文）。
+    /// 与 `--admin-password-sha256` 二选一；都缺省则密码登录不启用。
+    #[arg(long, env = "SCOOTLENS_ADMIN_PASSWORD", hide_env_values = true)]
+    admin_password: Option<String>,
+
+    /// Console 密码登录的密码 SHA-256 摘要（64 位 hex；避免明文进 shell 历史）。
+    #[arg(long, value_name = "HEX64")]
+    admin_password_sha256: Option<String>,
+
+    /// Microsoft Entra ID 登录：App Registration client id。设置后启用 MS 登录，
+    /// 需同时配置 redirect-uri、SCOOTLENS_MSAUTH_CLIENT_SECRET 与至少一条白名单。
+    #[arg(long, value_name = "GUID")]
+    msauth_client_id: Option<String>,
+
+    /// Microsoft Entra ID 租户（`organizations` / `common` / 租户 id）。
+    #[arg(long, default_value = "organizations")]
+    msauth_tenant: String,
+
+    /// OAuth 回调地址（须与 App Registration 一致），如
+    /// `http://127.0.0.1:9910/auth/ms/callback`。
+    #[arg(long, value_name = "URL")]
+    msauth_redirect_uri: Option<String>,
+
+    /// Microsoft client secret（环境变量传入，不进 CLI 历史）。
+    #[arg(long, env = "SCOOTLENS_MSAUTH_CLIENT_SECRET", hide_env_values = true)]
+    msauth_client_secret: Option<String>,
+
+    /// 允许登录的邮箱（可重复）。与 `--msauth-allow-domain` 至少配一条。
+    #[arg(long = "msauth-allow-email", value_name = "EMAIL")]
+    msauth_allow_emails: Vec<String>,
+
+    /// 允许登录的邮箱域（可重复），如 `example.com`。
+    #[arg(long = "msauth-allow-domain", value_name = "DOMAIN")]
+    msauth_allow_domains: Vec<String>,
+
+    /// 经 HTTPS 反代部署时置位：会话 cookie 附加 `Secure`。
+    #[arg(long)]
+    auth_cookie_secure: bool,
 }
 
 fn main() -> Result<(), String> {
@@ -107,6 +151,7 @@ async fn run(args: Args) -> Result<(), String> {
         Dispatcher::new(kernel),
         GatewayConfig {
             console_dir: args.console_dir.clone(),
+            auth: build_auth(&args)?,
             ..GatewayConfig::default()
         },
     );
@@ -129,6 +174,79 @@ async fn run(args: Args) -> Result<(), String> {
     }
 
     gateway.serve(listener).await.map_err(|e| e.to_string())
+}
+
+/// 组装 Console 登录配置（docs/06-security-model.md §Console 认证）。
+///
+/// 半配置（如设了 client id 却缺 secret / 回调 / 白名单）直接启动失败，
+/// 不静默降级 —— 认证配置错误必须显式暴露。
+fn build_auth(args: &Args) -> Result<AuthConfig, String> {
+    let password = match (&args.admin_password, &args.admin_password_sha256) {
+        (Some(_), Some(_)) => {
+            return Err(
+                "--admin-password (env) and --admin-password-sha256 are mutually exclusive".into(),
+            );
+        }
+        (Some(plain), None) => {
+            if plain.is_empty() {
+                return Err("SCOOTLENS_ADMIN_PASSWORD must not be empty".into());
+            }
+            Some(PasswordConfig::from_plain(&args.admin_user, plain))
+        }
+        (None, Some(hex)) => Some(PasswordConfig {
+            username: args.admin_user.clone(),
+            password_sha256: scootlens_gateway::parse_sha256_hex(hex)
+                .map_err(|e| format!("--admin-password-sha256: {e}"))?,
+        }),
+        (None, None) => None,
+    };
+
+    let microsoft = match &args.msauth_client_id {
+        None => None,
+        Some(client_id) => {
+            let redirect_uri = args
+                .msauth_redirect_uri
+                .clone()
+                .ok_or("--msauth-redirect-uri is required with --msauth-client-id")?;
+            let client_secret = args
+                .msauth_client_secret
+                .clone()
+                .filter(|s| !s.is_empty())
+                .ok_or("SCOOTLENS_MSAUTH_CLIENT_SECRET is required with --msauth-client-id")?;
+            if args.msauth_allow_emails.is_empty() && args.msauth_allow_domains.is_empty() {
+                return Err(
+                    "at least one --msauth-allow-email / --msauth-allow-domain is required \
+                     (empty allowlist would reject every login)"
+                        .into(),
+                );
+            }
+            Some(MicrosoftConfig {
+                client_id: client_id.clone(),
+                tenant: args.msauth_tenant.clone(),
+                redirect_uri,
+                client_secret,
+                allowed_emails: args.msauth_allow_emails.clone(),
+                allowed_domains: args.msauth_allow_domains.clone(),
+            })
+        }
+    };
+
+    if password.is_some() || microsoft.is_some() {
+        let modes: Vec<&str> = [
+            password.as_ref().map(|_| "password"),
+            microsoft.as_ref().map(|_| "microsoft"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        println!("console login: {}", modes.join(" + "));
+    }
+
+    Ok(AuthConfig {
+        password,
+        microsoft,
+        cookie_secure: args.auth_cookie_secure,
+    })
 }
 
 /// 解析 `--issue <subject>=<scope,scope…>` 并签发令牌。

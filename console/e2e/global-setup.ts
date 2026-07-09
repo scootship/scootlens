@@ -60,7 +60,11 @@ export default async function globalSetup(): Promise<void> {
       "--issue",
       "agent:e2e=proc:list,nav@fixture.test,view@fixture.test,act@fixture.test,js:exec@fixture.test",
     ],
-    { stdio: ["ignore", "pipe", "pipe"] },
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+      // Console 密码登录（e2e 覆盖登录页 → cookie 会话 → WS 握手闭环）
+      env: { ...process.env, SCOOTLENS_ADMIN_PASSWORD: "e2e-console-pass" },
+    },
   );
   let stderr = "";
   child.stderr?.on("data", (c: Buffer) => (stderr += c.toString()));

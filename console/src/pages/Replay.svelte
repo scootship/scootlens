@@ -11,6 +11,8 @@
     type TimelineItem,
   } from "../lib/replay";
   import { formatTs, kindLabel, kindTone } from "../lib/format";
+  import { sortProcs, preferredPid } from "../lib/procs";
+  import { friendlyError } from "../lib/errors";
 
   let { api, pulse }: { api: ConsoleApi; pulse: number } = $props();
 
@@ -30,7 +32,7 @@
   );
 
   function message(e: unknown): string {
-    return e instanceof Error ? e.message : String(e);
+    return friendlyError(e);
   }
 
   async function loadBundle(raw: unknown) {
@@ -81,15 +83,14 @@
     api
       .procList()
       .then((p) => {
-        procs = p;
-        if (!pid && p.length > 0) pid = p[0].pid;
+        procs = sortProcs(p);
+        if (!pid && p.length > 0) pid = preferredPid(p);
       })
       .catch((e) => (error = message(e)));
   });
 </script>
 
 <div class="section-head">
-  <h2>Replay</h2>
   <select bind:value={pid} data-testid="replay-pid">
     {#each procs as p (p.pid)}
       <option value={p.pid}>{p.pid} · {p.state}</option>

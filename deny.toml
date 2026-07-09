@@ -18,6 +18,9 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Zlib",
+    # Mozilla CA 根证书数据（webpki-roots，reqwest/rustls TLS 出站用）；
+    # 宽松数据许可，仅覆盖证书清单数据本身
+    "CDLA-Permissive-2.0",
 ]
 
 [bans]

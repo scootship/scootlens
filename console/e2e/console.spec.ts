@@ -80,6 +80,8 @@ test("connect + dashboard: engine info and spawn/kill lifecycle", async ({ page 
   await expect(page.locator("tbody tr", { hasText: pid })).toContainText("running");
 
   await page.getByTestId(`kill-${pid}`).click();
+  // terminated 默认收起（避免累积霸屏）：展开后可见
+  await page.getByTestId("toggle-terminated").click();
   await expect(page.locator("tbody tr", { hasText: pid })).toContainText("terminated");
 });
 
@@ -202,8 +204,8 @@ test("settings: token scopes, grant/revoke, vault write-only, net rules", async 
   await connectAsAdmin(page);
   await page.getByTestId("tab-settings").click();
 
-  // 本会话令牌
-  await expect(page.locator(".card", { hasText: "本会话令牌" })).toContainText("user:admin");
+  // 本会话身份
+  await expect(page.locator(".card", { hasText: "本会话身份" })).toContainText("user:admin");
 
   // 动态授权
   await page.getByTestId("grant-subject").fill("agent:e2e");
@@ -289,27 +291,19 @@ test("session: matched credential binding fills login fields through vault_ref",
   await page.getByTestId("credential-save").click();
   await expect(page.getByTestId("settings-notice")).toContainText("凭据绑定已保存");
 
-  const admin = new AgentWs(ADMIN());
-  try {
-    const sp = await admin.call("proc.spawn", {});
-    const pid = (sp.result as { pid: string }).pid;
-    await page.getByTestId("tab-session").click();
-    await expect(page.getByTestId("session-pid")).toContainText(pid);
-    await page.getByTestId("session-pid").selectOption(pid);
-    await page.getByTestId("goto-url").fill("http://fixture.test/login");
-    await page.getByRole("button", { name: "导航" }).click();
+  const pid = await spawnProc(page);
+  await page.getByTestId("tab-session").click();
+  await page.getByTestId("session-pid").selectOption(pid);
+  await page.getByTestId("goto-url").fill("http://fixture.test/login");
+  await page.getByRole("button", { name: "导航" }).click();
 
-    await expect(page.getByTestId("credential-choice")).toContainText("Fixture Login");
-    await page.getByTestId("credential-fill").click();
+  await expect(page.getByTestId("credential-choice")).toContainText("Fixture Login");
+  await page.getByTestId("credential-fill").click();
 
-    const table = page.locator("table", { hasText: "Password" });
-    await expect(table).toContainText("[REDACTED]");
-    await expect(table).not.toContainText("TOPSECRET-fixture-password");
-    await expect(table).not.toContainText("alice@example.test");
-    await admin.call("proc.kill", { pid });
-  } finally {
-    admin.close();
-  }
+  const table = page.locator("table", { hasText: "Password" });
+  await expect(table).toContainText("[REDACTED]");
+  await expect(table).not.toContainText("TOPSECRET-fixture-password");
+  await expect(table).not.toContainText("alice@example.test");
 });
 
 test("session: spawn with imported profile → logged-in session ready for takeover", async ({ page }) => {
@@ -362,4 +356,35 @@ test("session: spawn with imported profile → logged-in session ready for takeo
   } finally {
     admin.close();
   }
+});
+
+test("auth: password login → cookie session drives console; bad password rejected", async ({
+  page,
+}) => {
+  // 无 token 直开 → 登录页（不再要求把令牌贴进 URL）
+  await page.goto("/");
+  await expect(page.getByTestId("login-user")).toBeVisible();
+
+  // 错误密码 → 明确报错，不进入控制台
+  await page.getByTestId("login-user").fill("admin");
+  await page.getByTestId("login-pass").fill("wrong-pass");
+  await page.getByTestId("login-submit").click();
+  await expect(page.locator(".error")).toContainText("用户名或密码错误");
+  await expect(page.getByTestId("tab-dashboard")).not.toBeVisible();
+
+  // 正确密码 → cookie 会话 → WS 握手 → Dashboard 可用，身份为 user:admin
+  await page.getByTestId("login-pass").fill("e2e-console-pass");
+  await page.getByTestId("login-submit").click();
+  await expect(page.getByTestId("tab-dashboard")).toBeVisible();
+  await expect(page.locator(".sidebar-foot .who")).toContainText("user:admin");
+
+  // 刷新后会话仍在（cookie 持久于本次浏览器上下文）→ 自动重连，无需再登录
+  await page.reload();
+  await expect(page.getByTestId("tab-dashboard")).toBeVisible();
+
+  // 退出登录 → 回到登录页；再刷新也不会自动进入
+  await page.getByRole("button", { name: "退出登录" }).click();
+  await expect(page.getByTestId("login-user")).toBeVisible();
+  await page.reload();
+  await expect(page.getByTestId("login-user")).toBeVisible();
 });

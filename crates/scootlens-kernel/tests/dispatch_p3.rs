@@ -598,7 +598,7 @@ async fn state_delete_rejects_other_namespaces_and_missing_key() {
 #[tokio::test]
 async fn vault_credentials_are_deletable_and_redaction_survives() {
     let (d, dir) = stateful();
-    let secret = "vault-secret-C0FFEE-99";
+    let secret = "vault-secret-C0FFEE-99"; // gitleaks:allow — 测试夹具占位凭据，非真实密钥
     ok(&call(
         &d,
         "state.write",

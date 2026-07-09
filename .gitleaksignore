@@ -1,0 +1,3 @@
+# 已复核的历史误报：内核 vault 单测里的占位凭据（非真实密钥），
+# 用于验证 state.write/state.delete/redaction 生命周期。
+e8b2fbaf72b299fec079cdc1c31eb1c06aa148fd:crates/scootlens-kernel/tests/dispatch_p3.rs:generic-api-key:601

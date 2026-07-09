@@ -392,6 +392,11 @@ test("auth: password login → cookie session drives console; bad password rejec
 test("approvals: checked auto-approve rule resolves pending js.exec without a click", async ({
   page,
 }) => {
+  // 内核 approval_timeout 默认 60s（人工审批调用内等待上限）；自动批准的
+  // round trip（事件送达 → console 自动 approve → 调用恢复）通常 <1s，
+  // 但 CI runner 偶发抖动时不应让测试在触达内核自身超时前就被判超时——
+  // 用例超时需 ≥ 内核 approval_timeout + 余量，见 KernelConfig::approval_timeout。
+  test.setTimeout(75_000);
   await connectAsAdmin(page);
   const pid = await spawnProc(page);
 

@@ -1,0 +1,6 @@
+# 已复核的历史误报：内核 vault 单测里的占位凭据（非真实密钥），
+# 用于验证 state.write/state.delete/redaction 生命周期。
+# gitleaks 的 fetch-depth:0 会拉全部分支历史，该 commit 目前只存在于
+# feat/state-inspect-delete 分支，但会被其它分支的 CI 扫到——因此这里
+# 也需要同一条放行。
+e8b2fbaf72b299fec079cdc1c31eb1c06aa148fd:crates/scootlens-kernel/tests/dispatch_p3.rs:generic-api-key:601

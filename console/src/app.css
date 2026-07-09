@@ -688,6 +688,13 @@ td.row-actions button + button {
   overflow-x: auto;
 }
 
+/* 元素清单可能很长（如分页控件较多的页面），限高并内部滚动，
+   避免把下方「保存登录态」等操作面板挤出可视区域。 */
+.elements-scroll {
+  max-height: 42vh;
+  overflow-y: auto;
+}
+
 /* ---------- Tabs（页内子导航） ---------- */
 
 .tabs {

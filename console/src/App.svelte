@@ -10,6 +10,12 @@
     loginErrorMessage,
     type AuthProviders,
   } from "./lib/auth";
+  import {
+    listAutoApprove,
+    matchesAutoApprove,
+    parseCapRequest,
+    toggleAutoApprove,
+  } from "./lib/autoapprove";
   import Dashboard from "./pages/Dashboard.svelte";
   import Session from "./pages/Session.svelte";
   import Inspector from "./pages/Inspector.svelte";
@@ -116,6 +122,25 @@
   let pulse = $state(0);
   /** 最近事件（Inspector 事件流）。 */
   let events = $state<{ seq: number; topic: string; text: string }[]>([]);
+  /** 自动审批：勾选的作用域族（Approvals 页维护；这里消费）。 */
+  let autoApprove = $state<Set<string>>(listAutoApprove());
+  /** 最近一次自动批准的说明（Approvals 页展示）。 */
+  let autoApprovedNote = $state<string | null>(null);
+
+  /** cap.request 事件命中勾选集合 → 自动批准（不 remember：范围锁在本次勾选期）。 */
+  function maybeAutoApprove(a: ConsoleApi, text: string) {
+    const req = parseCapRequest(text);
+    if (!req) return;
+    const rule = matchesAutoApprove(req.scope, autoApprove);
+    if (!rule) return;
+    a.approve(req.approvalId, "allow", false)
+      .then(() => {
+        autoApprovedNote = `已自动批准 ${req.method}（${req.scope} · 规则 ${rule}）`;
+      })
+      .catch(() => {
+        // 竞态（已被他人处理）或权限不足：留给人工收件箱，不打扰
+      });
+  }
 
   // ---------- 登录状态 ----------
   let providers = $state<AuthProviders>({ password: false, microsoft: false });
@@ -139,20 +164,24 @@
     error = null;
     try {
       const c = new RpcClient(handshakeUrl(base, useToken));
+      let liveApi: ConsoleApi | null = null;
       c.onState((s) => (conn = s));
       c.onEvent((_method, params) => {
         pulse += 1;
         const p = params as { event?: { seq?: number; topic?: string } } | null;
         const ev = p?.event;
         if (ev && typeof ev.seq === "number") {
+          const text = JSON.stringify(ev);
           events = [
             ...events.slice(-199),
-            { seq: ev.seq, topic: String(ev.topic ?? "?"), text: JSON.stringify(ev) },
+            { seq: ev.seq, topic: String(ev.topic ?? "?"), text },
           ];
+          if (liveApi && ev.topic === "cap.request") maybeAutoApprove(liveApi, text);
         }
       });
       await c.connect();
       const a = new ConsoleApi(c);
+      liveApi = a;
       // 连接级订阅：全部主题（gateway 会话语义），驱动 pulse 与事件流
       await a.subscribe();
       try {
@@ -396,7 +425,13 @@
         {:else if tab === "inspector"}
           <Inspector {api} {pulse} {events} />
         {:else if tab === "approvals"}
-          <Approvals {api} {pulse} />
+          <Approvals
+            {api}
+            {pulse}
+            enabled={autoApprove}
+            note={autoApprovedNote}
+            onToggle={(id, on) => (autoApprove = toggleAutoApprove(id, on))}
+          />
         {:else if tab === "journal"}
           <Journal {api} {pulse} />
         {:else if tab === "replay"}

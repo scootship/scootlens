@@ -204,6 +204,13 @@ export class ConsoleApi {
     return this.client.call("state.import", { profile, state: bundle });
   }
 
+  /** 导出运行中会话的完整状态束（cookies + storage）；配合 stateImport
+   *  实现「接管登录 → 存为 profile → 新会话复用」。敏感操作（🔒）。 */
+  async stateExport(pid: string): Promise<unknown> {
+    const r = await this.client.call<{ state: unknown }>("state.export", { pid });
+    return r.state;
+  }
+
   netRulesGet(pid?: string): Promise<unknown> {
     const params: Record<string, unknown> = {};
     if (pid) params.pid = pid;

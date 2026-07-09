@@ -388,3 +388,84 @@ test("auth: password login → cookie session drives console; bad password rejec
   await page.reload();
   await expect(page.getByTestId("login-user")).toBeVisible();
 });
+
+test("approvals: checked auto-approve rule resolves pending js.exec without a click", async ({
+  page,
+}) => {
+  await connectAsAdmin(page);
+  const pid = await spawnProc(page);
+
+  // 勾选 js:exec 自动审批
+  await page.getByTestId("tab-approvals").click();
+  await page.getByTestId("auto-rule-js:exec").check();
+
+  const agent = new AgentWs(AGENT());
+  await agent.call("nav.goto", { pid, url: "http://fixture.test/" });
+
+  // 敏感调用挂起 → cap.request 事件 → console 自动批准 → 调用自行恢复
+  const out = await agent.call("js.exec", { pid, script: "40+2" });
+  expect(out.error, `auto-approved call resumes: ${JSON.stringify(out)}`).toBeUndefined();
+  await expect(page.getByTestId("autoapprove-note")).toContainText("js.exec");
+
+  // 取消勾选后恢复人工审批（挂起不再自动放行）
+  await page.getByTestId("auto-rule-js:exec").uncheck();
+  let resolved = false;
+  const pending = agent.call("js.exec", { pid, script: "1" }).then((r) => {
+    resolved = true;
+    return r;
+  });
+  const card = page.locator(".approval", { hasText: "agent:e2e" }).first();
+  await expect(card).toBeVisible();
+  expect(resolved).toBe(false);
+  await card.getByRole("button", { name: "拒绝" }).click();
+  const denied = await pending;
+  expect(denied.error, "denied call must error").toBeDefined();
+
+  agent.close();
+});
+
+test("session: quick kill switches away and terminated pids leave the dropdown", async ({
+  page,
+}) => {
+  await connectAsAdmin(page);
+  const pid = await spawnProc(page);
+
+  await page.getByTestId("tab-session").click();
+  await page.getByTestId("session-pid").selectOption(pid);
+
+  // 快速 Kill → 通知 + 终止的 pid 不再出现在下拉列表
+  await page.getByTestId("session-kill").click();
+  await expect(page.getByTestId("session-notice")).toContainText(`已终止 ${pid}`);
+  const values = await page
+    .getByTestId("session-pid")
+    .locator("option")
+    .evaluateAll((os) => os.map((o) => (o as HTMLOptionElement).value));
+  expect(values).not.toContain(pid);
+});
+
+test("session: save live session state as a profile for future spawns", async ({ page }) => {
+  await connectAsAdmin(page);
+  const pid = await spawnProc(page);
+
+  // 会话内产生可导出的登录态（fixture 登录页写 cookie）
+  await page.getByTestId("tab-session").click();
+  await page.getByTestId("session-pid").selectOption(pid);
+  await page.getByTestId("goto-url").fill("http://fixture.test/login");
+  await page.getByRole("button", { name: "导航" }).click();
+  await expect(page.getByTestId("screencast")).toBeVisible();
+
+  // 保存为 profile → 通知 + spawn 下拉出现该 profile
+  await page.getByTestId("save-profile-name").fill("live-save");
+  await page.getByTestId("save-profile").click();
+  await expect(page.getByTestId("session-notice")).toContainText("live-save");
+  const options = await page
+    .getByTestId("spawn-profile")
+    .locator("option")
+    .evaluateAll((os) => os.map((o) => (o as HTMLOptionElement).value));
+  expect(options).toContain("live-save");
+
+  // 用它新开会话成功（内核 profile 状态已存在）
+  await page.getByTestId("spawn-profile").selectOption("live-save");
+  await page.getByTestId("spawn-with-profile").click();
+  await expect(page.getByTestId("session-notice")).toContainText("live-save");
+});

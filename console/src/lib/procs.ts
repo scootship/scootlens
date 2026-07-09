@@ -52,6 +52,18 @@ export function preferredPid(procs: ProcInfo[]): string {
   return active[0]?.pid ?? terminated[0]?.pid ?? "";
 }
 
+/** 仅活跃进程的首选 pid（Session/Inspector：终止进程不自动选中）。 */
+export function preferredActivePid(procs: ProcInfo[]): string {
+  return splitProcs(procs).active[0]?.pid ?? "";
+}
+
+/** 选择器可选项：活跃进程 + （若当前选中的已终止）该项保留在末尾以免下拉跳变。 */
+export function selectableProcs(procs: ProcInfo[], currentPid: string): ProcInfo[] {
+  const { active, terminated } = splitProcs(procs);
+  const current = terminated.find((p) => p.pid === currentPid);
+  return current ? [...active, current] : active;
+}
+
 /** 状态 → 视觉基调（tag 样式）。 */
 export function stateTone(state: string): "ok" | "warn" | "muted" | "info" {
   switch (state) {

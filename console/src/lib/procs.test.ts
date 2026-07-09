@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ProcInfo } from "./api";
-import { preferredPid, sortProcs, splitProcs, stateTone } from "./procs";
+import { preferredPid, selectableProcs, sortProcs, splitProcs, stateTone } from "./procs";
 
 const proc = (pid: string, state: string): ProcInfo => ({ pid, state });
 
@@ -38,6 +38,19 @@ describe("splitProcs / preferredPid", () => {
     expect(preferredPid([proc("p-1", "terminated"), proc("p-2", "running")])).toBe("p-2");
     expect(preferredPid([proc("p-1", "terminated")])).toBe("p-1");
     expect(preferredPid([])).toBe("");
+  });
+});
+
+describe("selectableProcs", () => {
+  const list = [proc("p-1", "terminated"), proc("p-2", "running"), proc("p-3", "terminated")];
+
+  it("lists active only when current is active or empty", () => {
+    expect(selectableProcs(list, "p-2").map((p) => p.pid)).toEqual(["p-2"]);
+    expect(selectableProcs(list, "").map((p) => p.pid)).toEqual(["p-2"]);
+  });
+
+  it("keeps the currently selected terminated proc at the end", () => {
+    expect(selectableProcs(list, "p-3").map((p) => p.pid)).toEqual(["p-2", "p-3"]);
   });
 });
 

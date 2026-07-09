@@ -343,6 +343,7 @@ impl Kernel {
                 state: e.state,
                 engine: e.engine.to_owned(),
                 profile: e.profile.clone(),
+                url: e.current_url.as_ref().map(ToString::to_string),
             })
             .collect();
         out.sort_by(|a, b| a.pid.as_str().cmp(b.pid.as_str()));
@@ -357,6 +358,7 @@ impl Kernel {
             state: e.state,
             engine: e.engine.to_owned(),
             profile: e.profile.clone(),
+            url: e.current_url.as_ref().map(ToString::to_string),
         })
     }
 

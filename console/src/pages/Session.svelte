@@ -8,10 +8,17 @@
     takeoverView,
     containRect,
     clickRatio,
+    pickLoginFields,
     type SnapshotElement,
     type TakeoverView,
   } from "../lib/session";
   import { listProfiles, rememberProfile } from "../lib/profiles";
+  import {
+    listCredentials,
+    matchingCredentials,
+    originMatches,
+    type CredentialProfile,
+  } from "../lib/credentials";
 
   let { api, pulse, self }: { api: ConsoleApi; pulse: number; self: string } = $props();
 
@@ -29,9 +36,16 @@
   let profileChoice = $state<string>(listProfiles()[0] ?? "");
   let newProfile = $state("");
   let spawning = $state(false);
+  let credentials = $state<CredentialProfile[]>(listCredentials());
+  let credentialChoice = $state("");
 
   const view = $derived<TakeoverView>(takeoverView(holder, self));
-  const procState = $derived(procs.find((p) => p.pid === pid)?.state ?? null);
+  const proc = $derived(procs.find((p) => p.pid === pid) ?? null);
+  const procState = $derived(proc?.state ?? null);
+  const matchedCredentials = $derived(matchingCredentials(proc?.url, credentials));
+  const selectedCredential = $derived(
+    matchedCredentials.find((c) => c.id === credentialChoice) ?? matchedCredentials[0] ?? null,
+  );
   // 实际用于 spawn 的 profile 名：新建时取输入框，否则取下拉选中项（空=默认空白会话）。
   const effProfile = $derived(profileChoice === NEW_PROFILE ? newProfile.trim() : profileChoice.trim());
 
@@ -123,6 +137,27 @@
     }
   }
 
+  async function fillCredential(c: CredentialProfile | null) {
+    if (!c) return;
+    if (!proc?.url || !originMatches(c.origin, proc.url)) {
+      error = "当前页面 origin 与凭据绑定不匹配";
+      return;
+    }
+    const fields = pickLoginFields(elements);
+    if (!fields.username?.ref || !fields.password?.ref) {
+      error = "未找到可填充的用户名/密码输入框，请刷新元素或手动选择字段";
+      return;
+    }
+    try {
+      await api.actTypeVault(pid, fields.username.ref, c.usernameRef);
+      await api.actTypeVault(pid, fields.password.ref, c.passwordRef);
+      error = null;
+      await Promise.all([captureFrame(), refreshSnapshot(), refreshProcs()]);
+    } catch (e) {
+      error = message(e);
+    }
+  }
+
   /** 直接点击画面（仅接管中生效）：把点击偏移换算成归一化坐标 → act.point.click。 */
   async function pointClick(ev: MouseEvent) {
     if (view.kind !== "held-by-me") return;
@@ -152,7 +187,7 @@
     if (!gotoUrl.trim()) return;
     try {
       await api.navGoto(pid, gotoUrl.trim());
-      await Promise.all([captureFrame(), refreshSnapshot()]);
+      await Promise.all([captureFrame(), refreshSnapshot(), refreshProcs()]);
     } catch (e) {
       error = message(e);
     }
@@ -169,8 +204,17 @@
     if (pid) {
       frame = null;
       holder = null;
+      credentials = listCredentials();
       captureFrame();
       refreshSnapshot();
+    }
+  });
+
+  $effect(() => {
+    if (matchedCredentials.length === 0) {
+      credentialChoice = "";
+    } else if (!matchedCredentials.some((c) => c.id === credentialChoice)) {
+      credentialChoice = matchedCredentials[0].id;
     }
   });
 
@@ -269,6 +313,39 @@
 
     <div class="card">
       <h3>输入注入 <small class="muted">语义元素 → act.*</small></h3>
+      {#if matchedCredentials.length}
+        <div class="toolbar">
+          <select
+            bind:value={credentialChoice}
+            data-testid="credential-choice"
+            title="当前页面 origin 命中的凭据绑定"
+          >
+            {#each matchedCredentials as c (c.id)}
+              <option value={c.id}>{c.label} · {c.origin}</option>
+            {/each}
+          </select>
+          <button
+            class="primary"
+            onclick={() => fillCredential(selectedCredential)}
+            disabled={view.kind === "held-by-other"}
+            data-testid="credential-fill"
+          >
+            填入凭据
+          </button>
+          {#if selectedCredential?.loginUrl}
+            <button
+              onclick={() => {
+                gotoUrl = selectedCredential.loginUrl ?? "";
+                goto();
+              }}
+              disabled={view.kind === "held-by-other"}
+              data-testid="credential-login-url"
+            >
+              打开登录页
+            </button>
+          {/if}
+        </div>
+      {/if}
       <div class="toolbar">
         <input placeholder="Type 文本…" bind:value={typeText} data-testid="type-text" />
         <button onclick={refreshSnapshot}>刷新元素</button>

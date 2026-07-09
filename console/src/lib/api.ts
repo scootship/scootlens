@@ -17,6 +17,7 @@ export interface ProcInfo {
   pid: string;
   state: string;
   engine?: string;
+  profile?: string;
   url?: string | null;
   title?: string | null;
 }
@@ -145,6 +146,10 @@ export class ConsoleApi {
     return this.client.call("act.type", { pid, ref, text });
   }
 
+  actTypeVault(pid: string, ref: string, vaultRef: string): Promise<unknown> {
+    return this.client.call("act.type", { pid, ref, vault_ref: vaultRef });
+  }
+
   actPress(pid: string, keys: string): Promise<unknown> {
     return this.client.call("act.press", { pid, keys });
   }
@@ -185,6 +190,12 @@ export class ConsoleApi {
   /** vault 单向写入（只写不读）；返回后仅显示 vault_ref 句柄。 */
   vaultWrite(name: string, secret: string): Promise<unknown> {
     return this.client.call("state.write", { namespace: "vault", key: name, value: secret });
+  }
+
+  /** 只列出 vault_ref 名称，不返回 secret。 */
+  async vaultList(): Promise<string[]> {
+    const r = await this.client.call("state.list", { namespace: "vault" });
+    return asArray(r, "names") as string[];
   }
 
   /** 把登录会话（cookie + localStorage）导入 profile，后续 spawn 该 profile 即带登录态。

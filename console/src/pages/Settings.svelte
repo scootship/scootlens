@@ -3,6 +3,12 @@
   import { scopeLabel } from "../lib/format";
   import { buildStateBundle } from "../lib/cookies";
   import { listProfiles, rememberProfile } from "../lib/profiles";
+  import {
+    forgetCredential,
+    listCredentials,
+    saveCredential,
+    type CredentialProfile,
+  } from "../lib/credentials";
 
   let { api, pulse }: { api: ConsoleApi; pulse: number } = $props();
 
@@ -21,6 +27,13 @@
   let vaultName = $state("");
   let vaultSecret = $state("");
   let vaultRef = $state<string | null>(null);
+  let vaultNames = $state<string[]>([]);
+  let credentialLabel = $state("");
+  let credentialOrigin = $state("");
+  let credentialUsernameRef = $state("");
+  let credentialPasswordRef = $state("");
+  let credentialLoginUrl = $state("");
+  let credentials = $state<CredentialProfile[]>(listCredentials());
   let netRules = $state("");
   let importProfile = $state("");
   let importCookies = $state("");
@@ -49,6 +62,11 @@
       self = await api.capList();
       const r = (await api.netRulesGet()) as { rules?: unknown };
       netRules = JSON.stringify(r.rules ?? { default: "allow", rules: [] }, null, 2);
+      try {
+        vaultNames = await api.vaultList();
+      } catch {
+        vaultNames = [];
+      }
       error = null;
     } catch (e) {
       error = message(e);
@@ -86,10 +104,39 @@
     if (!name || !vaultSecret) return;
     act(async () => {
       await api.vaultWrite(name, vaultSecret);
+      vaultNames = await api.vaultList().catch(() => vaultNames);
       vaultRef = name;
       vaultSecret = "";
       vaultName = "";
     }, `凭据已写入 vault（只写不读）`);
+  }
+
+  function saveCredentialProfile() {
+    notice = null;
+    error = null;
+    try {
+      credentials = saveCredential({
+        label: credentialLabel,
+        origin: credentialOrigin,
+        usernameRef: credentialUsernameRef,
+        passwordRef: credentialPasswordRef,
+        loginUrl: credentialLoginUrl,
+      });
+      credentialLabel = "";
+      credentialOrigin = "";
+      credentialUsernameRef = "";
+      credentialPasswordRef = "";
+      credentialLoginUrl = "";
+      notice = "凭据绑定已保存";
+    } catch (e) {
+      error = message(e);
+    }
+  }
+
+  function deleteCredentialProfile(id: string) {
+    credentials = forgetCredential(id);
+    notice = "凭据绑定已删除";
+    error = null;
   }
 
   function applyNetRules() {
@@ -187,7 +234,7 @@
   </div>
 {:else if sub === "vault"}
   <div class="grid">
-    <div class="card" style="grid-column: 1 / -1;">
+    <div class="card">
       <h3>vault 写入 <small class="muted">单向；Agent 经 vault_ref 使用</small></h3>
       <div style="display:flex; flex-direction:column; gap:8px; max-width:520px;">
         <input placeholder="凭据名，如 gh-password" bind:value={vaultName} data-testid="vault-name" />
@@ -199,6 +246,66 @@
           {/if}
         </div>
       </div>
+    </div>
+
+    <div class="card">
+      <h3>站点凭据绑定 <small class="muted">origin → vault_ref</small></h3>
+      <div style="display:flex; flex-direction:column; gap:8px; max-width:560px;">
+        <input placeholder="名称，如 GitHub 主账号" bind:value={credentialLabel} data-testid="credential-label" />
+        <input placeholder="域名 / origin，如 github.com 或 *.corp.test" bind:value={credentialOrigin} data-testid="credential-origin" />
+        <input
+          class="mono"
+          placeholder="用户名 vault_ref，如 gh-username"
+          bind:value={credentialUsernameRef}
+          list="vault-names"
+          data-testid="credential-username-ref"
+        />
+        <input
+          class="mono"
+          placeholder="密码 vault_ref，如 gh-password"
+          bind:value={credentialPasswordRef}
+          list="vault-names"
+          data-testid="credential-password-ref"
+        />
+        <input placeholder="登录页 URL（可选）" bind:value={credentialLoginUrl} data-testid="credential-login-url" />
+        {#if vaultNames.length}
+          <datalist id="vault-names">
+            {#each vaultNames as n (n)}
+              <option value={n}></option>
+            {/each}
+          </datalist>
+        {/if}
+        <div class="toolbar">
+          <button class="primary" onclick={saveCredentialProfile} data-testid="credential-save">保存绑定</button>
+        </div>
+        <small class="muted">只保存域名与 vault_ref；Session 页仅在当前 URL 命中该 origin 时显示填充动作。</small>
+      </div>
+    </div>
+
+    <div class="card" style="grid-column: 1 / -1;">
+      <h3>已保存绑定</h3>
+      {#if credentials.length === 0}
+        <div class="empty">暂无凭据绑定</div>
+      {:else}
+        <table>
+          <thead><tr><th>名称</th><th>origin</th><th>vault_ref</th><th>登录页</th><th></th></tr></thead>
+          <tbody>
+            {#each credentials as c (c.id)}
+              <tr>
+                <td>{c.label}</td>
+                <td class="mono">{c.origin}</td>
+                <td class="mono">{c.usernameRef} / {c.passwordRef}</td>
+                <td class="mono">{c.loginUrl ?? "—"}</td>
+                <td class="row-actions">
+                  <button class="danger" onclick={() => deleteCredentialProfile(c.id)} data-testid="credential-delete-{c.id}">
+                    删除
+                  </button>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
+      {/if}
     </div>
   </div>
 {:else if sub === "session"}

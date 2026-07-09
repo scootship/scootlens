@@ -265,6 +265,53 @@ test("settings: import login session from pasted cookies → profile reuse", asy
   }
 });
 
+test("session: matched credential binding fills login fields through vault_ref", async ({ page }) => {
+  await connectAsAdmin(page);
+
+  await page.getByTestId("tab-settings").click();
+  await page.getByTestId("subtab-vault").click();
+
+  await page.getByTestId("vault-name").fill("fixture-user");
+  await page.getByTestId("vault-secret").fill("alice@example.test");
+  await page.getByTestId("vault-write").click();
+  await expect(page.getByTestId("vault-ref")).toContainText("fixture-user");
+
+  await page.getByTestId("vault-name").fill("fixture-password");
+  await page.getByTestId("vault-secret").fill("TOPSECRET-fixture-password");
+  await page.getByTestId("vault-write").click();
+  await expect(page.getByTestId("vault-ref")).toContainText("fixture-password");
+
+  await page.getByTestId("credential-label").fill("Fixture Login");
+  await page.getByTestId("credential-origin").fill("fixture.test");
+  await page.getByTestId("credential-username-ref").fill("fixture-user");
+  await page.getByTestId("credential-password-ref").fill("fixture-password");
+  await page.getByTestId("credential-login-url").fill("http://fixture.test/login");
+  await page.getByTestId("credential-save").click();
+  await expect(page.getByTestId("settings-notice")).toContainText("凭据绑定已保存");
+
+  const admin = new AgentWs(ADMIN());
+  try {
+    const sp = await admin.call("proc.spawn", {});
+    const pid = (sp.result as { pid: string }).pid;
+    await page.getByTestId("tab-session").click();
+    await expect(page.getByTestId("session-pid")).toContainText(pid);
+    await page.getByTestId("session-pid").selectOption(pid);
+    await page.getByTestId("goto-url").fill("http://fixture.test/login");
+    await page.getByRole("button", { name: "导航" }).click();
+
+    await expect(page.getByTestId("credential-choice")).toContainText("Fixture Login");
+    await page.getByTestId("credential-fill").click();
+
+    const table = page.locator("table", { hasText: "Password" });
+    await expect(table).toContainText("[REDACTED]");
+    await expect(table).not.toContainText("TOPSECRET-fixture-password");
+    await expect(table).not.toContainText("alice@example.test");
+    await admin.call("proc.kill", { pid });
+  } finally {
+    admin.close();
+  }
+});
+
 test("session: spawn with imported profile → logged-in session ready for takeover", async ({ page }) => {
   await connectAsAdmin(page);
 

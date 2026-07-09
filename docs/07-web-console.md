@@ -36,7 +36,9 @@
    鼠标/键盘事件经 ABI 回注（VNC 模式）；接管期间 Agent 的 act 调用被暂挂并提示
 2. **审批卡**：`E_APPROVAL_PENDING` 挂起的调用实时推送；卡片必含：主体、作用域、参数摘要、
    当前页截图；支持"本次/永久（生成规则）/拒绝"
-3. **vault 写入**：Settings 中单向写入表单；写入后仅显示 `vault_ref` 句柄
+3. **vault 写入与站点绑定**：Settings 中单向写入表单；写入后仅显示 `vault_ref`
+   句柄；可保存 `origin → username_ref/password_ref` 绑定，Session 只在当前 URL
+   命中该 origin 时显示显式填充动作
 
 ## 权限
 
@@ -70,7 +72,8 @@ v0 单管理员令牌足够。
   （`sha256(prev+raw)` + prev 链接）并显示校验状态；syscall 时间线 + 画面帧按 `ts_ms` 对齐，
   支持步进/拖动/仅本 pid 过滤与 `.json` 下载
 - **Settings**（P4）：本会话令牌作用域（`cap.list`）、动态授权（`cap.grant/revoke`）、
-  vault 单向写入（写后仅显示 `vault_ref`）、全局网络规则编辑（`net.rules.get/set`）；
+  vault 单向写入（写后仅显示 `vault_ref`）、站点凭据绑定（origin 匹配后在 Session
+  中经 `act.type` + `vault_ref` 显式填充）、全局网络规则编辑（`net.rules.get/set`）；
   令牌签发在守护进程侧：`scootlensd --issue <subject>=<scope,…>`
 - **分层与测试**：全部协议/校验逻辑集中在 `src/lib/`（`rpc` / `api` / `format` / `journal` /
   `session` / `replay` / `connect`），Vitest 单测覆盖 ≥80%（CI 门禁 #11）；Svelte 组件仅做展示；

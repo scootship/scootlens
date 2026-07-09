@@ -425,6 +425,36 @@
 
     <div style="display:flex; flex-direction:column; gap:14px;">
       <div class="card">
+        <h3>保存登录态 <small class="muted">state.export → profile（新会话复用）</small></h3>
+        <p class="card-desc">
+          接管登录完成后，把当前会话的 cookie/storage 存为 profile；之后「新开会话」
+          从下拉选它即带登录态。
+        </p>
+        <div class="toolbar" style="margin:0">
+          <input
+            placeholder="profile 名，如 google"
+            bind:value={saveProfile}
+            list="known-profiles-session"
+            data-testid="save-profile-name"
+            style="flex:1; min-width:140px"
+          />
+          <datalist id="known-profiles-session">
+            {#each knownProfiles as p (p)}
+              <option value={p}></option>
+            {/each}
+          </datalist>
+          <button
+            class="primary"
+            onclick={saveAsProfile}
+            disabled={savingProfile || !saveProfile.trim() || procState !== "running"}
+            data-testid="save-profile"
+          >
+            {savingProfile ? "保存中…" : "保存"}
+          </button>
+        </div>
+      </div>
+
+      <div class="card">
         <h3>输入注入 <small class="muted">语义元素 → act.*</small></h3>
         {#if matchedCredentials.length}
           <div class="toolbar credential-fill">
@@ -466,7 +496,7 @@
         {#if elements.length === 0}
           <div class="empty">无可交互元素</div>
         {:else}
-          <div class="table-scroll">
+          <div class="table-scroll elements-scroll">
             <table>
               <thead><tr><th>元素</th><th>ref</th><th></th></tr></thead>
               <tbody>
@@ -493,36 +523,6 @@
             </table>
           </div>
         {/if}
-      </div>
-
-      <div class="card">
-        <h3>保存登录态 <small class="muted">state.export → profile（新会话复用）</small></h3>
-        <p class="card-desc">
-          接管登录完成后，把当前会话的 cookie/storage 存为 profile；之后「新开会话」
-          从下拉选它即带登录态。
-        </p>
-        <div class="toolbar" style="margin:0">
-          <input
-            placeholder="profile 名，如 google"
-            bind:value={saveProfile}
-            list="known-profiles-session"
-            data-testid="save-profile-name"
-            style="flex:1; min-width:140px"
-          />
-          <datalist id="known-profiles-session">
-            {#each knownProfiles as p (p)}
-              <option value={p}></option>
-            {/each}
-          </datalist>
-          <button
-            class="primary"
-            onclick={saveAsProfile}
-            disabled={savingProfile || !saveProfile.trim() || procState !== "running"}
-            data-testid="save-profile"
-          >
-            {savingProfile ? "保存中…" : "保存"}
-          </button>
-        </div>
       </div>
     </div>
   </div>

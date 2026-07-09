@@ -27,7 +27,7 @@ pub use dispatch::Dispatcher;
 pub use journal::{Journal, JournalEntry, JournalKind, JournalLine, parse_lines};
 pub use netstack::{NetStack, ProcPolicy};
 pub use proc::{ProcInfo, ProcState};
-pub use redact::Redactor;
+pub use redact::{Redactor, SUBSTRING_MIN_LEN};
 pub use security::{AuthzGate, Caller, SecurityManager};
 pub use vfs::StateVfs;
 pub use wf::WfClock;
@@ -775,6 +775,59 @@ impl Kernel {
         Ok(())
     }
 
+    /// 已导入的 profile 名列表（`state.list` namespace=profiles）。
+    pub fn list_profile_names(&self) -> HalResult<Vec<String>> {
+        self.inner.vfs.profile_names()
+    }
+
+    /// 读取 profile 的已导入状态包；不存在 → `Ok(None)`，损坏 → `E_INTERNAL`。
+    ///
+    /// 仅供内核内部与摘要展示使用——dispatch 层只把 entry 元数据（键名/域/标志/
+    /// 字节数）暴露出去，值本身绝不进入任何 syscall 返回值。
+    pub fn read_profile_state(&self, profile: &str) -> HalResult<Option<StateBundle>> {
+        match self.inner.vfs.profile_read(profile) {
+            None => Ok(None),
+            Some(text) => serde_json::from_str(&text)
+                .map(Some)
+                .map_err(|e| AbiError::new(ErrorCode::Internal, format!("profile decode: {e}"))),
+        }
+    }
+
+    /// `state.delete`（ADR-0011）：删除整个 profile，或仅其中一条 entry。
+    ///
+    /// 返回删除的 entry 数。profile / entry 不存在 → `E_INVALID_ARG`。
+    /// 只作用于 profile 存储，不触碰任何运行中的进程。
+    pub fn delete_profile_state(&self, profile: &str, entry: Option<&str>) -> HalResult<u64> {
+        match entry {
+            None => {
+                let removed = self
+                    .read_profile_state(profile)?
+                    .map(|b| b.entries.len() as u64)
+                    .ok_or_else(|| no_such_profile(profile))?;
+                self.inner.vfs.profile_delete(profile)?;
+                tracing::info!(%profile, entries = removed, "profile state deleted");
+                Ok(removed)
+            }
+            Some(key) => {
+                let mut bundle = self
+                    .read_profile_state(profile)?
+                    .ok_or_else(|| no_such_profile(profile))?;
+                if bundle.entries.remove(key).is_none() {
+                    return Err(AbiError::new(
+                        ErrorCode::InvalidArg,
+                        format!("no such entry {key:?} in profile {profile:?}"),
+                    ));
+                }
+                let text = serde_json::to_string_pretty(&bundle).map_err(|e| {
+                    AbiError::new(ErrorCode::Internal, format!("profile encode: {e}"))
+                })?;
+                self.inner.vfs.profile_write(profile, &text)?;
+                tracing::info!(%profile, entry = %key, "profile entry deleted");
+                Ok(1)
+            }
+        }
+    }
+
     /// 高配额门槛（dispatch 鉴权 `quota:high` 用）。
     pub fn quota_high_bytes(&self) -> u64 {
         self.inner.config.quota_high_bytes
@@ -807,6 +860,10 @@ impl Kernel {
 
 fn not_found(pid: &Pid) -> AbiError {
     AbiError::new(ErrorCode::ProcNotFound, format!("proc {pid} not found"))
+}
+
+fn no_such_profile(profile: &str) -> AbiError {
+    AbiError::new(ErrorCode::InvalidArg, format!("no such profile: {profile}"))
 }
 
 /// 快照文件内容（`state_dir/snapshots/<hash>.json`）。

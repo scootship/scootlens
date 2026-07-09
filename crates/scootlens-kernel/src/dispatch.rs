@@ -68,16 +68,18 @@ impl Dispatcher {
             .and_then(Value::as_str)
             .map(str::to_owned);
 
-        // 预登记：vault 写入的秘密必须在落 journal 前进入脱敏表，
-        // 否则首次写入的明文会随 `call` 记录泄漏（journal 在 route 之前）。
-        if req.method == method::STATE_WRITE
-            && req.params.get("namespace").and_then(Value::as_str) == Some("vault")
-            && let Some(secret) = req.params.get("value").and_then(Value::as_str)
-        {
-            redactor.add(secret);
-        }
-
+        // 预登记 + 结构化遮蔽：vault 写入的 value 绝不落 journal——
+        // 无论长短一律在此处结构化替换，不依赖子串脱敏。
         let mut params_summary = req.params.clone();
+        if req.method == method::STATE_WRITE
+            && params_summary.get("namespace").and_then(Value::as_str) == Some("vault")
+            && let Some(v) = params_summary.get_mut("value")
+        {
+            if let Some(secret) = v.as_str() {
+                redactor.add(secret);
+            }
+            *v = Value::String(crate::redact::mask());
+        }
         redactor.sanitize(&mut params_summary);
         journal.record(
             JournalKind::Call,
@@ -500,6 +502,16 @@ impl Dispatcher {
                 k.import_profile_state(&p.profile, &p.state)?;
                 Ok(json!({ "ok": true }))
             }
+            method::STATE_DELETE => {
+                let p: StateDeleteParams = parse(params)?;
+                self.authz(
+                    caller,
+                    Scope::required(&["state", "delete", &p.namespace], None),
+                    m,
+                )
+                .await?;
+                self.state_delete(&p)
+            }
             // ---------- net ----------
             method::NET_RULES_SET => {
                 let p: NetRulesSetParams = parse(params)?;
@@ -720,6 +732,25 @@ impl Dispatcher {
                     }
                 }
             }
+            // 已导入的 profile：只回元数据摘要，值绝不回流（导入的 cookie 是登录凭据，
+            // 与 vault 只列名同一原则）
+            "profiles" => {
+                let profile = p.key.as_deref().ok_or_else(|| {
+                    AbiError::new(
+                        ErrorCode::InvalidArg,
+                        "key (profile name) is required; enumerate with state.list",
+                    )
+                })?;
+                let bundle = k.read_profile_state(profile)?.ok_or_else(|| {
+                    AbiError::new(ErrorCode::InvalidArg, format!("no such profile: {profile}"))
+                })?;
+                let entries: Vec<Value> = bundle
+                    .entries
+                    .iter()
+                    .map(|(k, v)| profile_entry_digest(k, v))
+                    .collect();
+                Ok(json!({ "profile": profile, "entries": entries }))
+            }
             other => Err(AbiError::new(
                 ErrorCode::InvalidArg,
                 format!("unknown namespace {other:?}"),
@@ -743,7 +774,7 @@ impl Dispatcher {
                     AbiError::new(ErrorCode::InvalidArg, "vault value must be a string")
                 })?;
                 k.vfs().vault_write(key, secret)?;
-                // 写入即登记出口消毒
+                // 写入即登记出口消毒（短值只做整值精确匹配，见 redact.rs）
                 k.redactor().add(secret);
                 Ok(json!({ "ok": true }))
             }
@@ -760,6 +791,10 @@ impl Dispatcher {
                 ErrorCode::Unsupported,
                 "downloads namespace is engine-written only",
             )),
+            "profiles" => Err(AbiError::new(
+                ErrorCode::Unsupported,
+                "profile state is written via state.import (delete via state.delete)",
+            )),
             other => Err(AbiError::new(
                 ErrorCode::InvalidArg,
                 format!("unknown namespace {other:?}"),
@@ -772,6 +807,7 @@ impl Dispatcher {
         match p.namespace.as_str() {
             "vault" => Ok(json!({ "names": k.vfs().vault_names() })),
             "downloads" => Ok(json!({ "names": k.vfs().list_files("downloads")? })),
+            "profiles" => Ok(json!({ "names": k.list_profile_names()? })),
             ns @ ("cookies" | "storage") => {
                 let pid = require_pid(p)?;
                 let bundle = k.export_state(&pid).await?;
@@ -784,6 +820,51 @@ impl Dispatcher {
                     .collect();
                 Ok(json!({ "names": names }))
             }
+            other => Err(AbiError::new(
+                ErrorCode::InvalidArg,
+                format!("unknown namespace {other:?}"),
+            )),
+        }
+    }
+
+    /// `state.delete`（ADR-0011）：删除已导入的 profile 状态或 vault 凭据。
+    /// 值不出现在参数或返回里；运行中的进程不受影响；vault 删除**不**回收
+    /// 出口脱敏登记（历史 journal 与引擎侧可能仍有痕迹）。
+    fn state_delete(&self, p: &StateDeleteParams) -> Result<Value, AbiError> {
+        match p.namespace.as_str() {
+            "profiles" => {
+                let profile = p.key.as_deref().ok_or_else(|| {
+                    AbiError::new(ErrorCode::InvalidArg, "key (profile name) is required")
+                })?;
+                let deleted = self
+                    .kernel
+                    .delete_profile_state(profile, p.entry.as_deref())?;
+                Ok(json!({ "ok": true, "deleted": deleted }))
+            }
+            "vault" => {
+                let name = p.key.as_deref().ok_or_else(|| {
+                    AbiError::new(ErrorCode::InvalidArg, "key (credential name) is required")
+                })?;
+                if p.entry.is_some() {
+                    return Err(AbiError::new(
+                        ErrorCode::InvalidArg,
+                        "entry does not apply to the vault namespace",
+                    ));
+                }
+                if !self.kernel.vfs().vault_delete(name)? {
+                    return Err(AbiError::new(
+                        ErrorCode::InvalidArg,
+                        format!("no such vault credential: {name}"),
+                    ));
+                }
+                Ok(json!({ "ok": true, "deleted": 1 }))
+            }
+            ns @ ("downloads" | "cookies" | "storage") => Err(AbiError::new(
+                ErrorCode::Unsupported,
+                format!(
+                    "state.delete only supports the profiles and vault namespaces (got {ns:?})"
+                ),
+            )),
             other => Err(AbiError::new(
                 ErrorCode::InvalidArg,
                 format!("unknown namespace {other:?}"),
@@ -841,6 +922,43 @@ fn ns_prefix(ns: &str) -> &'static str {
     }
 }
 
+/// 单条 profile entry 的隐私保真摘要：键名、类别、元数据与值字节数——值本身
+/// 绝不进入返回。元数据（domain/path/secure/httpOnly）只对 cookie 形态提取：
+/// storage 值若恰为对象，其字段属于值内容，一并按字节数遮蔽。
+fn profile_entry_digest(key: &str, value: &Value) -> Value {
+    let kind = if key.starts_with("cookie:") {
+        "cookie"
+    } else if key.starts_with("storage:") {
+        "storage"
+    } else {
+        "other"
+    };
+    if kind == "cookie"
+        && let Some(obj) = value.as_object()
+    {
+        let mut d = json!({
+            "key": key,
+            "kind": kind,
+            "value_bytes": obj.get("value").map_or(0, masked_len),
+        });
+        for meta in ["domain", "path", "secure", "httpOnly"] {
+            if let Some(v) = obj.get(meta) {
+                d[meta] = v.clone();
+            }
+        }
+        return d;
+    }
+    json!({ "key": key, "kind": kind, "value_bytes": masked_len(value) })
+}
+
+/// 值的字节数（字符串取原长，其余按 JSON 序列化长度），只用于摘要。
+fn masked_len(value: &Value) -> u64 {
+    match value {
+        Value::String(s) => s.len() as u64,
+        other => serde_json::to_string(other).map_or(0, |s| s.len() as u64),
+    }
+}
+
 fn require_pid(p: &StateParams) -> Result<Pid, AbiError> {
     let pid = p.pid.as_deref().ok_or_else(|| {
         AbiError::new(
@@ -893,6 +1011,17 @@ struct StateImportParams {
     /// 导入目标是 profile（复用机制），不是运行中的 pid。
     profile: String,
     state: StateBundle,
+}
+
+#[derive(Deserialize)]
+struct StateDeleteParams {
+    namespace: String,
+    /// profiles：profile 名；vault：凭据名。
+    #[serde(default)]
+    key: Option<String>,
+    /// 仅 profiles：提供时只删这一条 entry（如 `cookie:sessionid`）；缺省整删。
+    #[serde(default)]
+    entry: Option<String>,
 }
 
 #[derive(Deserialize)]

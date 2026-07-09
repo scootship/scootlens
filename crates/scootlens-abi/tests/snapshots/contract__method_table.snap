@@ -36,6 +36,7 @@ expression: "method::ALL"
   "state.list",
   "state.export",
   "state.import",
+  "state.delete",
   "net.rules.set",
   "net.rules.get",
   "net.log",

@@ -221,6 +221,22 @@ test("settings: token scopes, grant/revoke, vault write-only, net rules", async 
   await expect(page.getByTestId("vault-ref")).toContainText("demo-cred");
   await expect(page.getByTestId("vault-secret")).toHaveValue("");
 
+  // 凭据可删除：列表只列名，删除后从列表消失
+  await expect(page.getByTestId("vault-table")).toContainText("demo-cred");
+  await expect(page.getByTestId("vault-table")).not.toContainText("s3cret-value");
+  await page.getByTestId("vault-delete-demo-cred").click();
+  await expect(page.getByTestId("settings-notice")).toContainText("已删除凭据「demo-cred」");
+  await expect(page.getByTestId("vault-delete-demo-cred")).toHaveCount(0);
+
+  // 短凭据值不限长度：写入成功，且名字不被脱敏误伤（值与名同前缀）
+  await page.getByTestId("vault-name").fill("demo-pin");
+  await page.getByTestId("vault-secret").fill("demo");
+  await page.getByTestId("vault-write").click();
+  await expect(page.getByTestId("vault-ref")).toContainText("demo-pin");
+  await expect(page.getByTestId("vault-table")).toContainText("demo-pin");
+  await page.getByTestId("vault-delete-demo-pin").click();
+  await expect(page.getByTestId("vault-delete-demo-pin")).toHaveCount(0);
+
   // 全局网络规则
   await page.getByTestId("subtab-network").click();
   await page
@@ -267,6 +283,48 @@ test("settings: import login session from pasted cookies → profile reuse", asy
   }
 });
 
+test("settings: imported profiles are inspectable (values redacted) and deletable", async ({ page }) => {
+  await connectAsAdmin(page);
+  await page.getByTestId("tab-settings").click();
+  await page.getByTestId("subtab-session").click();
+
+  // 导入一个带 httpOnly 登录 cookie 的 profile。
+  const secret = "TOPSECRET-audit-cookie";
+  await page.getByTestId("import-profile").fill("audit");
+  await page.getByTestId("import-cookies").fill(
+    JSON.stringify([
+      { name: "session", value: secret, domain: "fixture.test", path: "/", secure: true, httpOnly: true },
+      { name: "pref", value: "compact-mode", domain: "fixture.test", path: "/", secure: false, httpOnly: false },
+    ]),
+  );
+  await page.getByTestId("import-session").click();
+  await expect(page.getByTestId("settings-notice")).toContainText("已导入 profile");
+
+  // 内核权威列表里出现（state.list namespace=profiles）。
+  await expect(page.getByTestId("profiles-table")).toContainText("audit");
+
+  // 查看摘要：键名/域/标志/字节数可见，cookie 值明文绝不出现在页面上。
+  await page.getByTestId("profile-view-audit").click();
+  const digest = page.getByTestId("profile-digest");
+  await expect(digest).toContainText("cookie:session");
+  await expect(digest).toContainText("fixture.test");
+  await expect(digest).toContainText("httpOnly");
+  await expect(digest).toContainText(`${secret.length} B`);
+  await expect(digest).not.toContainText(secret);
+  await expect(digest).not.toContainText("compact-mode");
+
+  // 单条删除：session cookie 移除，pref 保留。
+  await page.getByTestId("profile-entry-delete-cookie:session").click();
+  await expect(page.getByTestId("settings-notice")).toContainText("已从「audit」删除 cookie:session");
+  await expect(digest).not.toContainText("cookie:session");
+  await expect(digest).toContainText("cookie:pref");
+
+  // 整删：profile 从列表消失。
+  await page.getByTestId("profile-delete-audit").click();
+  await expect(page.getByTestId("settings-notice")).toContainText("已删除 profile「audit」");
+  await expect(page.getByTestId("profile-view-audit")).toHaveCount(0);
+});
+
 test("session: matched credential binding fills login fields through vault_ref", async ({ page }) => {
   await connectAsAdmin(page);
 
@@ -283,6 +341,7 @@ test("session: matched credential binding fills login fields through vault_ref",
   await page.getByTestId("vault-write").click();
   await expect(page.getByTestId("vault-ref")).toContainText("fixture-password");
 
+  await page.getByTestId("subtab-bindings").click();
   await page.getByTestId("credential-label").fill("Fixture Login");
   await page.getByTestId("credential-origin").fill("fixture.test");
   await page.getByTestId("credential-username-ref").fill("fixture-user");
@@ -392,6 +451,11 @@ test("auth: password login → cookie session drives console; bad password rejec
 test("approvals: checked auto-approve rule resolves pending js.exec without a click", async ({
   page,
 }) => {
+  // 内核 approval_timeout 默认 60s（人工审批调用内等待上限）；自动批准的
+  // round trip（事件送达 → console 自动 approve → 调用恢复）通常 <1s，
+  // 但 CI runner 偶发抖动时不应让测试在触达内核自身超时前就被判超时——
+  // 用例超时需 ≥ 内核 approval_timeout + 余量，见 KernelConfig::approval_timeout。
+  test.setTimeout(75_000);
   await connectAsAdmin(page);
   const pid = await spawnProc(page);
 

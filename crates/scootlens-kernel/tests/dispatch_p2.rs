@@ -368,7 +368,7 @@ async fn act_type_rejects_text_and_vault_ref_together() {
     ok(&call(
         &d,
         "state.write",
-        json!({ "namespace": "vault", "key": "pw", "value": "abc" }),
+        json!({ "namespace": "vault", "key": "pw", "value": "abc-vault-secret" }),
     )
     .await);
     let pid = pid_at(&d, "/login").await;

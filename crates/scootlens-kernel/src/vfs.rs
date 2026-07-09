@@ -69,6 +69,14 @@ impl StateVfs {
         self.lock_vault().names()
     }
 
+    /// 删除一条凭据；返回是否确实存在。**不**回收出口脱敏登记——已写入过的
+    /// secret 可能仍存在于历史 journal 或引擎侧状态，脱敏保持终身有效。
+    pub fn vault_delete(&self, name: &str) -> Result<bool, AbiError> {
+        self.lock_vault()
+            .remove(name)
+            .map_err(|e| AbiError::new(ErrorCode::Internal, format!("vault delete failed: {e}")))
+    }
+
     /// 内核内部解引用（`act.type` vault_ref）。**绝不进入任何 syscall 返回值**。
     pub(crate) fn vault_resolve(&self, name: &str) -> Option<String> {
         self.lock_vault().get(name)
@@ -202,6 +210,59 @@ impl StateVfs {
                 .cloned(),
         }
     }
+
+    /// 列出已导入的 profile 名（排序）。
+    pub fn profile_names(&self) -> Result<Vec<String>, AbiError> {
+        match &self.root {
+            Some(root) => {
+                let dir = root.join("profiles");
+                let mut names: Vec<String> = std::fs::read_dir(&dir)
+                    .map_err(|e| AbiError::new(ErrorCode::Internal, format!("read profiles: {e}")))?
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+                    .filter_map(|e| {
+                        e.file_name()
+                            .to_str()
+                            .and_then(|n| n.strip_suffix(".json"))
+                            .map(str::to_owned)
+                    })
+                    .collect();
+                names.sort();
+                Ok(names)
+            }
+            None => Ok(self
+                .mem_profiles
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .keys()
+                .cloned()
+                .collect()),
+        }
+    }
+
+    /// 删除整个 profile；返回是否确实存在。名字非法 → `E_INVALID_ARG`。
+    pub fn profile_delete(&self, name: &str) -> Result<bool, AbiError> {
+        validate_profile_name(name)?;
+        match &self.root {
+            Some(root) => {
+                let path = root.join("profiles").join(format!("{name}.json"));
+                match std::fs::remove_file(&path) {
+                    Ok(()) => Ok(true),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                    Err(e) => Err(AbiError::new(
+                        ErrorCode::Internal,
+                        format!("profile delete: {e}"),
+                    )),
+                }
+            }
+            None => Ok(self
+                .mem_profiles
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(name)
+                .is_some()),
+        }
+    }
 }
 
 /// sha256 前 16 hex（64-bit 内容寻址键）。
@@ -298,6 +359,14 @@ impl VaultStore {
         self.persist()
     }
 
+    fn remove(&mut self, name: &str) -> Result<bool, String> {
+        if self.data.entries.remove(name).is_none() {
+            return Ok(false);
+        }
+        self.persist()?;
+        Ok(true)
+    }
+
     fn get(&self, name: &str) -> Option<String> {
         self.data.entries.get(name).cloned()
     }
@@ -379,6 +448,23 @@ mod tests {
         let vfs = StateVfs::open(None).expect("open");
         vfs.vault_write("k", "v").expect("write");
         assert_eq!(vfs.vault_resolve("k").as_deref(), Some("v"));
+    }
+
+    #[test]
+    fn vault_delete_removes_entry_and_persists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        {
+            let vfs = StateVfs::open(Some(dir.path())).expect("open");
+            vfs.vault_write("pw", "s3cret").expect("write");
+            assert!(vfs.vault_delete("pw").expect("delete"), "existed");
+            assert!(!vfs.vault_delete("pw").expect("redelete"), "already gone");
+            assert!(vfs.vault_names().is_empty());
+            assert_eq!(vfs.vault_resolve("pw"), None);
+        }
+        // 删除必须写穿到加密 blob：重开后仍不在
+        let vfs2 = StateVfs::open(Some(dir.path())).expect("reopen");
+        assert!(vfs2.vault_names().is_empty(), "deletion must persist");
+        assert_eq!(vfs2.vault_resolve("pw"), None);
     }
 
     #[test]

@@ -400,6 +400,391 @@ async fn state_import_rejects_path_traversal_profile_names() {
     }
 }
 
+// ================= profiles 展示 / 删除（ADR-0011）=================
+
+/// 导入一个含 cookie + storage 的 profile（cookie 值为登录凭据形态）。
+async fn import_fixture_profile(d: &Dispatcher, profile: &str) {
+    ok(&call(
+        d,
+        "state.import",
+        json!({
+            "profile": profile,
+            "state": { "entries": {
+                "cookie:sessionid": {
+                    "value": "secret-session-DEADBEEF",
+                    "domain": ".shop.test",
+                    "path": "/",
+                    "secure": true,
+                    "httpOnly": true,
+                },
+                "storage:theme": "dark-mode-pref",
+                // 对象形 storage 值：字段属于值内容，摘要不得提取
+                "storage:blob": { "domain": "leak-check.test", "value": "nested-secret" },
+            } },
+        }),
+    )
+    .await);
+}
+
+#[tokio::test]
+async fn imported_profiles_are_listable_and_digest_never_leaks_values() {
+    let (d, _dir) = stateful();
+    import_fixture_profile(&d, "shop").await;
+
+    // 列表：只有名字
+    let names = ok(&call(&d, "state.list", json!({ "namespace": "profiles" })).await)["names"]
+        .as_array()
+        .expect("names")
+        .clone();
+    assert_eq!(names, vec![json!("shop")]);
+
+    // 摘要：键名 + 元数据可见，值绝不回流
+    let resp = call(
+        &d,
+        "state.read",
+        json!({ "namespace": "profiles", "key": "shop" }),
+    )
+    .await;
+    let digest = ok(&resp).clone();
+    assert_eq!(digest["profile"], "shop");
+    let entries = digest["entries"].as_array().expect("entries");
+    assert_eq!(entries.len(), 3);
+    let cookie = entries
+        .iter()
+        .find(|e| e["key"] == "cookie:sessionid")
+        .expect("cookie entry");
+    assert_eq!(cookie["kind"], "cookie");
+    assert_eq!(cookie["domain"], ".shop.test");
+    assert_eq!(cookie["httpOnly"], true);
+    assert_eq!(cookie["secure"], true);
+    assert_eq!(
+        cookie["value_bytes"],
+        "secret-session-DEADBEEF".len() as u64
+    );
+    let storage = entries
+        .iter()
+        .find(|e| e["key"] == "storage:theme")
+        .expect("storage entry");
+    assert_eq!(storage["kind"], "storage");
+    assert_eq!(storage["value_bytes"], "dark-mode-pref".len() as u64);
+    // 对象形 storage 值：字段是值内容，不得作为元数据提取
+    let blob = entries
+        .iter()
+        .find(|e| e["key"] == "storage:blob")
+        .expect("blob entry");
+    assert_eq!(blob["kind"], "storage");
+    assert_eq!(
+        blob["domain"],
+        Value::Null,
+        "storage object fields are values"
+    );
+
+    // 隐私：序列化后的完整返回里不含任何值明文
+    let text = digest.to_string();
+    for secret in [
+        "secret-session-DEADBEEF",
+        "dark-mode-pref",
+        "nested-secret",
+        "leak-check.test",
+    ] {
+        assert!(!text.contains(secret), "digest leaked value {secret:?}");
+    }
+
+    // 无 key / 不存在的 profile → E_INVALID_ARG
+    let no_key = call(&d, "state.read", json!({ "namespace": "profiles" })).await;
+    assert_eq!(err_code(&no_key), "E_INVALID_ARG");
+    let missing = call(
+        &d,
+        "state.read",
+        json!({ "namespace": "profiles", "key": "ghost" }),
+    )
+    .await;
+    assert_eq!(err_code(&missing), "E_INVALID_ARG");
+}
+
+#[tokio::test]
+async fn state_delete_removes_entry_then_whole_profile() {
+    let (d, _dir) = stateful();
+    import_fixture_profile(&d, "shop").await;
+
+    // 单条删除：cookie 移除，storage 保留
+    let one = ok(&call(
+        &d,
+        "state.delete",
+        json!({ "namespace": "profiles", "key": "shop", "entry": "cookie:sessionid" }),
+    )
+    .await)
+    .clone();
+    assert_eq!(one["deleted"], 1);
+    let digest = ok(&call(
+        &d,
+        "state.read",
+        json!({ "namespace": "profiles", "key": "shop" }),
+    )
+    .await)
+    .clone();
+    let keys: Vec<&str> = digest["entries"]
+        .as_array()
+        .expect("entries")
+        .iter()
+        .filter_map(|e| e["key"].as_str())
+        .collect();
+    assert_eq!(keys, vec!["storage:blob", "storage:theme"]);
+
+    // 已删的 entry 再删 → E_INVALID_ARG
+    let again = call(
+        &d,
+        "state.delete",
+        json!({ "namespace": "profiles", "key": "shop", "entry": "cookie:sessionid" }),
+    )
+    .await;
+    assert_eq!(err_code(&again), "E_INVALID_ARG");
+
+    // 整删：列表清空，同名 spawn 不再预加载
+    let whole = ok(&call(
+        &d,
+        "state.delete",
+        json!({ "namespace": "profiles", "key": "shop" }),
+    )
+    .await)
+    .clone();
+    assert_eq!(whole["deleted"], 2);
+    let names = ok(&call(&d, "state.list", json!({ "namespace": "profiles" })).await)["names"]
+        .as_array()
+        .expect("names")
+        .clone();
+    assert!(names.is_empty(), "profile list should be empty: {names:?}");
+
+    let pid = ok(&call(&d, "proc.spawn", json!({ "profile": "shop" })).await)["pid"]
+        .as_str()
+        .expect("pid")
+        .to_owned();
+    let read = call(
+        &d,
+        "state.read",
+        json!({ "pid": pid, "namespace": "cookies", "key": "sessionid" }),
+    )
+    .await;
+    assert_eq!(ok(&read)["value"], Value::Null, "preload must be gone");
+
+    // 不存在的 profile 整删 → E_INVALID_ARG
+    let ghost = call(
+        &d,
+        "state.delete",
+        json!({ "namespace": "profiles", "key": "ghost" }),
+    )
+    .await;
+    assert_eq!(err_code(&ghost), "E_INVALID_ARG");
+}
+
+#[tokio::test]
+async fn state_delete_rejects_other_namespaces_and_missing_key() {
+    let (d, _dir) = stateful();
+    for ns in ["downloads", "cookies", "storage"] {
+        let resp = call(&d, "state.delete", json!({ "namespace": ns, "key": "k" })).await;
+        assert_eq!(err_code(&resp), "E_UNSUPPORTED", "namespace {ns:?}");
+    }
+    let unknown = call(
+        &d,
+        "state.delete",
+        json!({ "namespace": "nope", "key": "k" }),
+    )
+    .await;
+    assert_eq!(err_code(&unknown), "E_INVALID_ARG");
+    let no_key = call(&d, "state.delete", json!({ "namespace": "profiles" })).await;
+    assert_eq!(err_code(&no_key), "E_INVALID_ARG");
+}
+
+#[tokio::test]
+async fn vault_credentials_are_deletable_and_redaction_survives() {
+    let (d, dir) = stateful();
+    let secret = "vault-secret-C0FFEE-99"; // gitleaks:allow — 测试夹具占位凭据，非真实密钥
+    ok(&call(
+        &d,
+        "state.write",
+        json!({ "namespace": "vault", "key": "pw", "value": secret }),
+    )
+    .await);
+    assert_eq!(
+        ok(&call(&d, "state.list", json!({ "namespace": "vault" })).await)["names"],
+        json!(["pw"])
+    );
+
+    // entry 参数对 vault 不适用
+    let with_entry = call(
+        &d,
+        "state.delete",
+        json!({ "namespace": "vault", "key": "pw", "entry": "x" }),
+    )
+    .await;
+    assert_eq!(err_code(&with_entry), "E_INVALID_ARG");
+
+    // 删除：列表清空；重复删除与缺 key 均报错
+    let del = ok(&call(
+        &d,
+        "state.delete",
+        json!({ "namespace": "vault", "key": "pw" }),
+    )
+    .await)
+    .clone();
+    assert_eq!(del["deleted"], 1);
+    assert_eq!(
+        ok(&call(&d, "state.list", json!({ "namespace": "vault" })).await)["names"],
+        json!([])
+    );
+    let again = call(
+        &d,
+        "state.delete",
+        json!({ "namespace": "vault", "key": "pw" }),
+    )
+    .await;
+    assert_eq!(err_code(&again), "E_INVALID_ARG");
+    let no_key = call(&d, "state.delete", json!({ "namespace": "vault" })).await;
+    assert_eq!(err_code(&no_key), "E_INVALID_ARG");
+
+    // 已删凭据不可再经 vault_ref 解引用
+    let pid = spawn_pid(&d).await;
+    let typed = call(
+        &d,
+        "act.type",
+        json!({ "pid": pid, "ref": "s1e0", "vault_ref": "pw" }),
+    )
+    .await;
+    assert_eq!(err_code(&typed), "E_INVALID_ARG");
+
+    // 删除不回收脱敏：journal 全量扫描仍无明文
+    let j = ok(&call(&d, "obs.journal", json!({ "limit": 200 })).await).clone();
+    let dump = j.to_string();
+    assert!(
+        !dump.contains(secret),
+        "secret leaked into journal after delete:\n{dump}"
+    );
+
+    // 持久化：同 state_dir 重开内核后凭据确实不在
+    let kernel2 = Kernel::open(
+        Arc::new(MockDriver::standard_fixture()),
+        KernelConfig {
+            state_dir: Some(dir.path().to_path_buf()),
+            ..KernelConfig::default()
+        },
+    )
+    .expect("reopen kernel");
+    let d2 = Dispatcher::new(kernel2);
+    assert_eq!(
+        ok(&call(&d2, "state.list", json!({ "namespace": "vault" })).await)["names"],
+        json!([])
+    );
+}
+
+#[tokio::test]
+async fn short_vault_secrets_accepted_and_names_never_mangled() {
+    let (d, _dir) = stateful();
+    // 值长度不限：短值照常写入（用户场景：demo / aaa / PIN）
+    for (key, value) in [("pin", "demo"), ("demo-passwd", "aaa"), ("pin2", "zq!7x")] {
+        ok(&call(
+            &d,
+            "state.write",
+            json!({ "namespace": "vault", "key": key, "value": value }),
+        )
+        .await);
+    }
+    ok(&call(
+        &d,
+        "state.write",
+        json!({ "namespace": "vault", "key": "demo-user", "value": "demo-secret-value" }),
+    )
+    .await);
+
+    // journal：vault value 结构化遮蔽，短值明文也不落盘（zq!7x 全局唯一）
+    let dump = ok(&call(&d, "obs.journal", json!({ "limit": 100 })).await)
+        .clone()
+        .to_string();
+    assert!(
+        !dump.contains("zq!7x"),
+        "short secret leaked into journal:\n{dump}"
+    );
+    assert!(
+        !dump.contains("demo-secret-value"),
+        "long secret leaked into journal:\n{dump}"
+    );
+
+    // 回归（用户场景）：短秘密与凭据名同子串，列表名字不得被脱敏改写
+    let names = ok(&call(&d, "state.list", json!({ "namespace": "vault" })).await)["names"].clone();
+    assert_eq!(names, json!(["demo-passwd", "demo-user", "pin", "pin2"]));
+
+    // 名字未被改写 → 按名删除照常生效
+    let del = ok(&call(
+        &d,
+        "state.delete",
+        json!({ "namespace": "vault", "key": "demo-user" }),
+    )
+    .await)
+    .clone();
+    assert_eq!(del["deleted"], 1);
+}
+
+#[tokio::test]
+async fn vault_delete_requires_scope() {
+    let (d, _dir) = stateful();
+    ok(&call(
+        &d,
+        "state.write",
+        json!({ "namespace": "vault", "key": "pw", "value": "s3cret-value-1" }),
+    )
+    .await);
+    // 只有 profiles 删除权 → vault 删除拒绝（qualifier 不覆盖）
+    let cleaner = limited("agent:cleaner", &["state:delete:profiles"]);
+    let denied = call_as(
+        &d,
+        &cleaner,
+        "state.delete",
+        json!({ "namespace": "vault", "key": "pw" }),
+    )
+    .await;
+    assert_eq!(err_code(&denied), "E_CAP_DENIED");
+    // 精确授权 state:delete:vault → 放行
+    let keysmith = limited("agent:keysmith", &["state:delete:vault"]);
+    let allowed = call_as(
+        &d,
+        &keysmith,
+        "state.delete",
+        json!({ "namespace": "vault", "key": "pw" }),
+    )
+    .await;
+    assert_eq!(ok(&allowed)["deleted"], 1);
+}
+
+#[tokio::test]
+async fn state_delete_requires_scope_and_narrow_grant_suffices() {
+    let (d, _dir) = stateful();
+    import_fixture_profile(&d, "shop").await;
+
+    // 无 state:delete 作用域（即使能读写 state）→ 拒绝
+    let reader = limited(
+        "agent:reader",
+        &["state:read:profiles", "state:list:profiles"],
+    );
+    let denied = call_as(
+        &d,
+        &reader,
+        "state.delete",
+        json!({ "namespace": "profiles", "key": "shop" }),
+    )
+    .await;
+    assert_eq!(err_code(&denied), "E_CAP_DENIED");
+
+    // 精确授权 state:delete:profiles → 放行
+    let cleaner = limited("agent:cleaner", &["state:delete:profiles"]);
+    let allowed = call_as(
+        &d,
+        &cleaner,
+        "state.delete",
+        json!({ "namespace": "profiles", "key": "shop" }),
+    )
+    .await;
+    assert_eq!(ok(&allowed)["ok"], true);
+}
+
 // ================= Scheduler 配额 =================
 
 fn quota_config() -> KernelConfig {

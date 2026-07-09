@@ -95,6 +95,11 @@ fn describe(m: &str) -> String {
         method::STATE_LIST => "List state VFS entries. Params: namespace, pid?.",
         method::STATE_EXPORT => "Export full session state bundle. Params: pid.",
         method::STATE_IMPORT => "Import a state bundle into a profile. Params: profile, state.",
+        method::STATE_DELETE => {
+            "Delete an imported profile (or one entry inside it) or a vault credential. \
+             Params: namespace=\"profiles\"|\"vault\", key, entry? (profiles only). \
+             Values are never returned."
+        }
         method::NET_RULES_SET => "Set network rules. Params: pid?, default?, rules?.",
         method::NET_RULES_GET => "Get network rules. Params: pid?.",
         method::NET_LOG => "Network request log. Params: pid?, limit?.",

@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { ConsoleApi, ProcInfo, NetLogEntry } from "../lib/api";
   import { formatTs } from "../lib/format";
-  import { sortProcs, preferredPid, stateTone } from "../lib/procs";
+  import { sortProcs, preferredActivePid, selectableProcs, stateTone } from "../lib/procs";
   import { topicTone, summarizeEvent, type ConsoleEvent } from "../lib/events";
   import { friendlyError } from "../lib/errors";
 
@@ -21,8 +21,11 @@
   let error = $state<string | null>(null);
   /** 事件流是否只看当前 pid。 */
   let onlyPid = $state(false);
+  /** 已展开的事件 seq 集合（点击行切换，查看完整载荷）。 */
+  let openSeqs = $state<Set<number>>(new Set());
 
   const proc = $derived(procs.find((p) => p.pid === pid) ?? null);
+  const options = $derived(selectableProcs(procs, pid));
   const shown = $derived.by(() => {
     const list = onlyPid && pid
       ? events.filter((ev) => summarizeEvent(ev.text).pid === pid)
@@ -30,10 +33,26 @@
     return list.slice(-60).reverse();
   });
 
+  function toggleEvent(seq: number) {
+    const next = new Set(openSeqs);
+    if (next.has(seq)) next.delete(seq);
+    else next.add(seq);
+    openSeqs = next;
+  }
+
+  function pretty(text: string): string {
+    try {
+      return JSON.stringify(JSON.parse(text), null, 2);
+    } catch {
+      return text;
+    }
+  }
+
   async function refreshProcs() {
     try {
       procs = sortProcs(await api.procList());
-      if (!pid && procs.length > 0) pid = preferredPid(procs);
+      const cur = procs.find((p) => p.pid === pid);
+      if (!pid || !cur) pid = preferredActivePid(procs) || pid;
     } catch (e) {
       error = friendlyError(e);
     }
@@ -74,7 +93,7 @@
 
 <div class="section-head">
   <select bind:value={pid} data-testid="inspector-pid">
-    {#each procs as p (p.pid)}
+    {#each options as p (p.pid)}
       <option value={p.pid}>{p.pid} · {p.state}</option>
     {/each}
   </select>
@@ -157,13 +176,25 @@
           <div class="event-list" data-testid="event-stream">
             {#each shown as ev (ev.seq)}
               {@const sum = summarizeEvent(ev.text)}
-              <div class="event-row" title={ev.text}>
-                <span class="seq">{ev.seq}</span>
-                <span class="topic"><span class="tag {topicTone(ev.topic)}">{ev.topic}</span></span>
-                {#if sum.pid}
-                  <span class="ev-pid">{sum.pid}</span>
+              {@const open = openSeqs.has(ev.seq)}
+              <div class="event-item" class:open>
+                <button
+                  class="event-row"
+                  onclick={() => toggleEvent(ev.seq)}
+                  title={open ? "收起" : "点击展开完整载荷"}
+                  data-testid="event-row-{ev.seq}"
+                >
+                  <span class="caret">{open ? "▾" : "▸"}</span>
+                  <span class="seq">{ev.seq}</span>
+                  <span class="topic"><span class="tag {topicTone(ev.topic)}">{ev.topic}</span></span>
+                  {#if sum.pid}
+                    <span class="ev-pid">{sum.pid}</span>
+                  {/if}
+                  <span class="fields">{sum.fields.join("  ")}</span>
+                </button>
+                {#if open}
+                  <pre class="event-detail" data-testid="event-detail-{ev.seq}">{pretty(ev.text)}</pre>
                 {/if}
-                <span class="fields">{sum.fields.join("  ")}</span>
               </div>
             {/each}
           </div>

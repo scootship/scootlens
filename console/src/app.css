@@ -751,9 +751,8 @@ td.row-actions button + button {
 
 .viewport img {
   width: 100%;
-  max-height: 420px;
+  max-height: 56vh;
   object-fit: contain;
-  image-rendering: pixelated;
   background: var(--surface-2);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
@@ -778,6 +777,64 @@ td.row-actions button + button {
   font-size: 12px;
 }
 
+/* ---------- 画面模态（Session 放大） ---------- */
+
+.view-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.view-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.view-modal-body {
+  position: relative;
+  z-index: 1;
+  width: min(1440px, 96vw);
+  max-height: 94vh;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  padding: 14px;
+  box-shadow: var(--shadow);
+}
+
+.view-modal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.view-modal-frame {
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  object-fit: contain;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.view-modal-frame.interactive {
+  cursor: crosshair;
+  border-color: color-mix(in srgb, var(--warn) 55%, transparent);
+}
+
 /* ---------- 事件流 ---------- */
 
 .event-list {
@@ -790,17 +847,37 @@ td.row-actions button + button {
   background: var(--surface-2);
 }
 
+.event-item {
+  border-bottom: 1px solid var(--line);
+}
+
+.event-item:last-child {
+  border-bottom: none;
+}
+
 .event-row {
   display: flex;
   align-items: baseline;
   gap: 10px;
+  width: 100%;
   padding: 7px 12px;
-  border-bottom: 1px solid var(--line);
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
   font-size: 12px;
+  text-align: left;
+  cursor: pointer;
 }
 
-.event-row:last-child {
-  border-bottom: none;
+.event-row:hover {
+  background: color-mix(in srgb, var(--surface) 60%, transparent);
+}
+
+.event-row .caret {
+  color: var(--faint);
+  flex: none;
+  width: 10px;
 }
 
 .event-row .seq {
@@ -828,6 +905,22 @@ td.row-actions button + button {
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
+}
+
+.event-item.open .fields {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.event-detail {
+  margin: 0;
+  padding: 10px 12px 12px 34px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--fg);
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* ---------- 登录页 ---------- */

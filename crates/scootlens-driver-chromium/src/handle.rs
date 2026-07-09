@@ -25,7 +25,8 @@ const NAV_TIMEOUT: Duration = Duration::from_secs(10);
 /// 点击/按键后判定"是否引发导航"的观察窗口。
 const NAV_PROBE: Duration = Duration::from_millis(900);
 /// 固定视口尺寸（`process.rs` 启动参数 `--window-size` 用同一常量）；
-/// `act.point.click` 的归一化坐标按此换算为像素（ADR-0010）。
+/// `act.point.click` 换算以 `Page.getLayoutMetrics` 实测视口为准，
+/// 本常量仅作 metrics 不可用时的回退（ADR-0010）。
 pub(crate) const VIEWPORT_WIDTH: u32 = 1280;
 pub(crate) const VIEWPORT_HEIGHT: u32 = 800;
 
@@ -225,18 +226,36 @@ impl ChromiumHandle {
     }
 
     async fn press_key(&self, key: &str) -> HalResult<()> {
-        let (code, key_code, text) = key_info(key)?;
+        let ev = key_info(key)?;
         for kind in ["keyDown", "keyUp"] {
             let mut p = json!({
-                "type": kind, "key": key, "code": code,
-                "windowsVirtualKeyCode": key_code, "nativeVirtualKeyCode": key_code,
+                "type": kind, "key": key, "code": ev.code,
+                "windowsVirtualKeyCode": ev.key_code, "nativeVirtualKeyCode": ev.key_code,
             });
-            if kind == "keyDown" && !text.is_empty() {
-                p["text"] = json!(text);
+            if kind == "keyDown" && !ev.text.is_empty() {
+                p["text"] = json!(ev.text);
             }
             self.call("Input.dispatchKeyEvent", p).await?;
         }
         Ok(())
+    }
+
+    /// 实测 CSS 视口尺寸。`--window-size` 在部分 headless 形态下含浏览器 UI 高度，
+    /// 固定常量换算会导致坐标点击纵向偏移（落点偏下），必须以 layout metrics 为准。
+    async fn viewport_size(&self) -> (f64, f64) {
+        let fallback = (f64::from(VIEWPORT_WIDTH), f64::from(VIEWPORT_HEIGHT));
+        let Ok(m) = self.call("Page.getLayoutMetrics", json!({})).await else {
+            return fallback;
+        };
+        let dim = |k: &str| {
+            m.pointer(&format!("/cssLayoutViewport/{k}"))
+                .and_then(Value::as_f64)
+                .filter(|v| *v > 0.0)
+        };
+        match (dim("clientWidth"), dim("clientHeight")) {
+            (Some(w), Some(h)) => (w, h),
+            _ => fallback,
+        }
     }
 }
 
@@ -457,10 +476,12 @@ impl EngineHandle for ChromiumHandle {
                 })
             }
             InputAction::ClickAt { x_ratio, y_ratio } => {
-                // 归一化比例 → 本引擎固定视口像素（内核已校验 [0,1]，kernel 也已
-                // 校验调用者持有接管；这里只管坐标换算与单击本身）。
-                let x = x_ratio * f64::from(VIEWPORT_WIDTH);
-                let y = y_ratio * f64::from(VIEWPORT_HEIGHT);
+                // 归一化比例 → 实测 CSS 视口像素（内核已校验 [0,1] 与接管 holder；
+                // 这里只管坐标换算与单击本身）。截图捕获的就是这个视口，因此
+                // 客户端从截图算出的比例 × 实测视口 = 精确落点。
+                let (vw, vh) = self.viewport_size().await;
+                let x = x_ratio * vw;
+                let y = y_ratio * vh;
                 let mut rx = self.conn.subscribe();
                 self.click_at(x, y).await?;
                 let nav = self
@@ -713,22 +734,55 @@ async fn bridge_events(
     }
 }
 
-/// P1 最小按键表。
-fn key_info(key: &str) -> HalResult<(&'static str, u32, &'static str)> {
+/// 键盘事件描述：CDP `Input.dispatchKeyEvent` 所需字段。
+struct KeyEvent {
+    code: &'static str,
+    key_code: u32,
+    /// keyDown 时插入的文本（空 = 纯控制键）。
+    text: String,
+}
+
+/// 按键表：控制/导航键 + 任意单个可打印字符（接管模式下的键盘透传）。
+fn key_info(key: &str) -> HalResult<KeyEvent> {
+    let named = |code, key_code, text: &str| KeyEvent {
+        code,
+        key_code,
+        text: text.to_owned(),
+    };
     Ok(match key {
-        "Enter" => ("Enter", 13, "\r"),
-        "Tab" => ("Tab", 9, "\t"),
-        "Escape" => ("Escape", 27, ""),
-        "Backspace" => ("Backspace", 8, ""),
-        "ArrowDown" => ("ArrowDown", 40, ""),
-        "ArrowUp" => ("ArrowUp", 38, ""),
-        "ArrowLeft" => ("ArrowLeft", 37, ""),
-        "ArrowRight" => ("ArrowRight", 39, ""),
+        "Enter" => named("Enter", 13, "\r"),
+        "Tab" => named("Tab", 9, "\t"),
+        "Escape" => named("Escape", 27, ""),
+        "Backspace" => named("Backspace", 8, ""),
+        "Delete" => named("Delete", 46, ""),
+        "Home" => named("Home", 36, ""),
+        "End" => named("End", 35, ""),
+        "PageUp" => named("PageUp", 33, ""),
+        "PageDown" => named("PageDown", 34, ""),
+        "ArrowDown" => named("ArrowDown", 40, ""),
+        "ArrowUp" => named("ArrowUp", 38, ""),
+        "ArrowLeft" => named("ArrowLeft", 37, ""),
+        "ArrowRight" => named("ArrowRight", 39, ""),
+        " " | "Space" => named("Space", 32, " "),
         other => {
-            return Err(AbiError::new(
-                ErrorCode::InvalidArg,
-                format!("unsupported key: {other} (P1 supports Enter/Tab/Escape/Backspace/Arrows)"),
-            ));
+            let mut chars = other.chars();
+            match (chars.next(), chars.next()) {
+                // 单个可打印字符：keyDown 携带 text 即完成插入（大小写/符号
+                // 由客户端的 KeyboardEvent.key 原样传入，无需服务端 Shift 建模）
+                (Some(c), None) if !c.is_control() => KeyEvent {
+                    code: "",
+                    key_code: 0,
+                    text: c.to_string(),
+                },
+                _ => {
+                    return Err(AbiError::new(
+                        ErrorCode::InvalidArg,
+                        format!(
+                            "unsupported key: {other} (named control keys or a single printable character)"
+                        ),
+                    ));
+                }
+            }
         }
     })
 }
@@ -738,5 +792,53 @@ fn value_as_cookie_str(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_info_named_keys() {
+        let enter = key_info("Enter").expect("enter");
+        assert_eq!(enter.code, "Enter");
+        assert_eq!(enter.key_code, 13);
+        assert_eq!(enter.text, "\r");
+        for k in [
+            "Tab",
+            "Escape",
+            "Backspace",
+            "Delete",
+            "Home",
+            "End",
+            "PageUp",
+            "PageDown",
+            "ArrowDown",
+            "ArrowUp",
+            "ArrowLeft",
+            "ArrowRight",
+        ] {
+            assert!(key_info(k).is_ok(), "named key {k} must be supported");
+        }
+        let space = key_info(" ").expect("space");
+        assert_eq!(space.text, " ");
+        assert_eq!(key_info("Space").expect("Space").key_code, 32);
+    }
+
+    #[test]
+    fn key_info_printable_chars() {
+        for (k, want) in [("a", "a"), ("Z", "Z"), ("!", "!"), ("中", "中"), ("1", "1")] {
+            let ev = key_info(k).expect("printable");
+            assert_eq!(ev.text, want);
+        }
+    }
+
+    #[test]
+    fn key_info_rejects_multi_char_and_control() {
+        assert!(key_info("Ctrl+C").is_err());
+        assert!(key_info("F5").is_err());
+        assert!(key_info("\u{7}").is_err(), "control char rejected");
+        assert!(key_info("").is_err());
     }
 }

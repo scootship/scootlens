@@ -1508,7 +1508,7 @@ dependencies = [
 
 [[package]]
 name = "scootctl"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "clap",
@@ -1521,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "scootlens-abi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "insta",
  "serde",
@@ -1531,7 +1531,7 @@ dependencies = [
 
 [[package]]
 name = "scootlens-driver-chromium"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -1550,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "scootlens-driver-mock"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "insta",
@@ -1563,7 +1563,7 @@ dependencies = [
 
 [[package]]
 name = "scootlens-gateway"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "futures-util",
@@ -1586,7 +1586,7 @@ dependencies = [
 
 [[package]]
 name = "scootlens-hal"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "insta",
@@ -1599,7 +1599,7 @@ dependencies = [
 
 [[package]]
 name = "scootlens-kernel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "chacha20poly1305",
@@ -1621,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "scootlens-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "futures-util",
@@ -1639,7 +1639,7 @@ dependencies = [
 
 [[package]]
 name = "scootlens-net"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "scootlens-abi",
  "url",
@@ -1647,7 +1647,7 @@ dependencies = [
 
 [[package]]
 name = "scootlens-test-support"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "tokio",
@@ -1655,7 +1655,7 @@ dependencies = [
 
 [[package]]
 name = "scootlensd"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "clap",

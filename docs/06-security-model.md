@@ -67,6 +67,26 @@ slt1.<base64url(claims_json)>.<base64url(ed25519_sig)>
 过期保护——ref 寻址的动作排队到接管结束后重放仍然安全（页面变了 ref 就会
 `E_REF_STALE`），坐标点击排队重放则可能在完全不同的页面状态下盲打一个像素坐标。
 
+## Console 认证
+
+Agent / 自动化恒走 capability 令牌握手（`GET /ws?token=slt1…`）。人类管理员如果也
+走这条路，就得把长期凭据贴进浏览器地址栏——令牌会进浏览器历史、代理日志与
+Referrer，暴露面不可接受。gateway 因此提供**会话 cookie 登录**（`/auth/*`，实现见
+`scootlens-gateway::auth`）：
+
+- **用户名密码**：`scootlensd --admin-user <name>` + `SCOOTLENS_ADMIN_PASSWORD`（env，
+  启动即 sha256 摘要，明文不驻留）或 `--admin-password-sha256 <hex>`（避免明文进 shell
+  历史）。校验为摘要常时比较；失败方不区分用户名/密码，且固定 400ms 延迟钝化在线穷举
+- **Microsoft Entra ID**（OAuth2 authorization-code flow，手工 HTTP 实现，不引 msal 类
+  重依赖）：`--msauth-client-id` / `--msauth-tenant` / `--msauth-redirect-uri` +
+  `SCOOTLENS_MSAUTH_CLIENT_SECRET`（env）。`state` 单次有效（5min TTL）；登录邮箱必须命中
+  `--msauth-allow-email` / `--msauth-allow-domain` 白名单，**空白名单 = 拒绝一切**，
+  且半配置（缺 secret/回调/白名单）直接启动失败，不静默降级
+- **会话**：登录成功建立内存会话（12h TTL，daemon 重启即失效），claims 与启动打印的
+  管理员令牌同权（全作用域 + 全自动审批）；cookie 为 `HttpOnly + SameSite=Strict`
+  （HTTPS 反代部署加 `--auth-cookie-secure` 附加 `Secure`）。WS 握手在缺 `?token=` 时
+  回退 cookie 会话；两者皆缺/皆无效一律 401，绝不落到匿名身份
+
 ## 威胁模型与对策
 
 | # | 风险 | 载体 | 对策 |
@@ -78,6 +98,7 @@ slt1.<base64url(claims_json)>.<base64url(ed25519_sig)>
 | T5 | 客户端令牌无效/越权请求 | Gateway 连接 | 令牌签名校验；作用域单点强制；令牌可吊销、限速、限期 |
 | T6 | 供应链风险 | 依赖 | `cargo-deny`（advisory/license）、lockfile 锁定、依赖新增需评审 |
 | T7 | 审计记录被事后修改 | journal | append-only + 每条哈希链；导出可校验 |
+| T8 | Console 登录凭据/会话泄漏 | /auth/* 与会话 cookie | 密码仅 POST body + 摘要常时比较；cookie HttpOnly + SameSite=Strict；会话内存态 12h；OAuth state 单次有效 + 邮箱白名单缺省拒绝 |
 
 ## unsafe 政策
 

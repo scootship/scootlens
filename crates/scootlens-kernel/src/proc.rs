@@ -22,4 +22,6 @@ pub struct ProcInfo {
     pub state: ProcState,
     pub engine: String,
     pub profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }

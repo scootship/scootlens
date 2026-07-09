@@ -79,6 +79,13 @@ cargo run -p scootctl -- ps                       # 列出全部进程
 
 常用守护进程参数：`--listen 127.0.0.1:9910`（默认）、`--state-dir <dir>`（持久化密钥/journal/vault，缺省为纯内存模式）、`--max-procs 8`、`--console-dir <dir>`（托管 Web Console 静态文件）、`--issue <subject>=<scope,…>`（额外签发受限令牌，可重复；敏感作用域默认人工审批）。
 
+Console 登录（可选，替代把 admin 令牌贴进 URL）：`SCOOTLENS_ADMIN_PASSWORD=… scootlensd`
+启用用户名密码登录（用户名默认 `admin`，可 `--admin-user` 改；也可用
+`--admin-password-sha256 <hex>` 避免明文进 shell）；Microsoft Entra ID 登录用
+`--msauth-client-id/--msauth-tenant/--msauth-redirect-uri` + `SCOOTLENS_MSAUTH_CLIENT_SECRET`
++ 白名单 `--msauth-allow-email/--msauth-allow-domain`（必配至少一条）。
+细节见 [docs/06-security-model.md](docs/06-security-model.md)。
+
 ### Web Console
 
 ```bash
@@ -90,8 +97,10 @@ npm run e2e        # Playwright UI e2e（需先 cargo build -p scootlensd 与 np
 ```
 
 Console 完整版包含 Dashboard / **Session（screencast + 人工接管 + 输入注入）** /
-**Inspector** / Approvals / Journal / **Replay（回放包离线验链播放）** / **Settings**。
-浏览器打开 `http://127.0.0.1:9910/?token=<admin token>&connect=1` 即可直连。
+**Inspector** / Approvals / Journal / **Replay（回放包离线验链播放）** / **Settings**，
+标准 admin dashboard 布局（左侧导航 + 右侧主面板，响应式）。配置了 Console 登录时，
+浏览器打开 `http://127.0.0.1:9910/` 用用户名密码或 Microsoft 账号登录；
+令牌直连 `http://127.0.0.1:9910/?token=<admin token>&connect=1` 仍可用（自动化便利）。
 
 也可以把 Console 直接**嵌入二进制**（先 `npm run build`，再带 feature 构建）：
 

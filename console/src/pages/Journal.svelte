@@ -2,6 +2,7 @@
   import type { ConsoleApi } from "../lib/api";
   import { checkIntegrity, type JournalEntry, type IntegrityReport } from "../lib/journal";
   import { formatTs, kindLabel, kindTone } from "../lib/format";
+  import { friendlyError } from "../lib/errors";
 
   let { api, pulse }: { api: ConsoleApi; pulse: number } = $props();
 
@@ -19,7 +20,7 @@
       // 完整性仅对未过滤窗口有意义（pid 过滤会天然产生 seq 缺口）。
       report = pid ? null : checkIntegrity(entries);
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = friendlyError(e);
     }
   }
 
@@ -30,7 +31,6 @@
 </script>
 
 <div class="section-head">
-  <h2>Journal</h2>
   {#if report}
     {#if report.ok}
       <span class="tag ok">链完整 · {report.count} 条</span>

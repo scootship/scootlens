@@ -182,6 +182,18 @@ async fn proc_list_and_sys_info() {
     assert_eq!(procs[0]["pid"], pid.as_str());
     assert_eq!(procs[0]["profile"], "work");
     assert_eq!(procs[0]["state"], "running");
+    assert!(procs[0].get("url").is_none());
+
+    let nav = call(
+        &d,
+        "nav.goto",
+        json!({"pid": pid, "url": "http://fixture.test/login"}),
+    )
+    .await;
+    result(&nav);
+    let resp = call(&d, "proc.list", json!({})).await;
+    let procs = result(&resp)["procs"].as_array().expect("procs");
+    assert_eq!(procs[0]["url"], "http://fixture.test/login");
 
     let resp = call(&d, "sys.info", json!({})).await;
     let si = result(&resp);

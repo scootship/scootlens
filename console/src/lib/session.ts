@@ -45,6 +45,53 @@ export function acceptsText(role: string): boolean {
   return ["textbox", "searchbox", "combobox", "textarea", "input"].includes(role.toLowerCase());
 }
 
+export interface LoginFields {
+  username?: SnapshotElement;
+  password?: SnapshotElement;
+}
+
+function fieldText(el: SnapshotElement): string {
+  return `${el.role} ${el.name} ${el.value ?? ""}`.toLowerCase();
+}
+
+function passwordScore(el: SnapshotElement): number {
+  const text = fieldText(el);
+  if (/(password|passcode|passwd|密码|口令)/i.test(text)) return 3;
+  return 0;
+}
+
+function usernameScore(el: SnapshotElement): number {
+  const text = fieldText(el);
+  if (/(username|user name|email|login|account|用户名|账号|邮箱|邮件)/i.test(text)) return 3;
+  if (/(user|mail)/i.test(text)) return 1;
+  return 0;
+}
+
+/** 从语义元素中选出最可能的用户名/密码输入框；返回 ref-bearing 文本字段。 */
+export function pickLoginFields(elements: SnapshotElement[]): LoginFields {
+  const textInputs = elements.filter((e) => e.ref && acceptsText(e.role));
+  const password = textInputs
+    .map((el, index) => ({ el, index, score: passwordScore(el) }))
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index)[0];
+
+  const passwordIndex = password ? textInputs.indexOf(password.el) : -1;
+  const username = textInputs
+    .map((el, index) => ({
+      el,
+      index,
+      score:
+        el === password?.el
+          ? -1
+          : usernameScore(el) * 10 +
+            (passwordIndex > index ? Math.max(0, 3 - (passwordIndex - index)) : 0),
+    }))
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index)[0];
+
+  return { username: username?.el, password: password?.el };
+}
+
 /** screencast 轮询间隔（毫秒）。挂起/终止进程返回 0 = 停止轮询。 */
 export function screencastInterval(procState: string | null | undefined): number {
   switch ((procState ?? "").toLowerCase()) {

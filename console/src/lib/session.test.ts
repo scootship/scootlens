@@ -7,6 +7,7 @@ import {
   takeoverView,
   containRect,
   clickRatio,
+  pickLoginFields,
 } from "./session";
 
 const SNAP = [
@@ -45,6 +46,38 @@ describe("acceptsText", () => {
     expect(acceptsText("SearchBox")).toBe(true);
     expect(acceptsText("button")).toBe(false);
     expect(acceptsText("link")).toBe(false);
+  });
+});
+
+describe("pickLoginFields", () => {
+  it("picks username and password fields from common labels", () => {
+    const els = interactive(parseSnapshotText(SNAP));
+    const picked = pickLoginFields(els);
+    expect(picked.username?.name).toBe("Username");
+    expect(picked.password?.name).toBe("Password");
+  });
+
+  it("uses nearby preceding text input as username fallback", () => {
+    const els = interactive(
+      parseSnapshotText(
+        [
+          '- document "Login"',
+          '  - textbox "Field A" [s2e1]',
+          '  - textbox "Field B" [s2e2]',
+          '  - textbox "Password" [s2e3]',
+        ].join("\n"),
+      ),
+    );
+    const picked = pickLoginFields(els);
+    expect(picked.username?.ref).toBe("s2e2");
+    expect(picked.password?.ref).toBe("s2e3");
+  });
+
+  it("returns empty fields when no password-like input exists", () => {
+    const els = interactive(parseSnapshotText('- textbox "Search" [s2e1]'));
+    const picked = pickLoginFields(els);
+    expect(picked.password).toBeUndefined();
+    expect(picked.username).toBeUndefined();
   });
 });
 

@@ -109,10 +109,12 @@ describe("ConsoleApi", () => {
     const { api, calls } = stub({ "act.click": {}, "act.type": {}, "act.press": {} });
     await api.actClick("p-1", "s1e2");
     await api.actType("p-1", "s1e2", "hi");
+    await api.actTypeVault("p-1", "s1e3", "gh-password");
     await api.actPress("p-1", "Enter");
-    expect(calls.map((c) => c.method)).toEqual(["act.click", "act.type", "act.press"]);
+    expect(calls.map((c) => c.method)).toEqual(["act.click", "act.type", "act.type", "act.press"]);
     expect(calls[1].params).toEqual({ pid: "p-1", ref: "s1e2", text: "hi" });
-    expect(calls[2].params).toEqual({ pid: "p-1", keys: "Enter" });
+    expect(calls[2].params).toEqual({ pid: "p-1", ref: "s1e3", vault_ref: "gh-password" });
+    expect(calls[3].params).toEqual({ pid: "p-1", keys: "Enter" });
   });
 
   it("actClickAt forwards normalized ratio payload", async () => {
@@ -154,6 +156,7 @@ describe("ConsoleApi", () => {
       "cap.grant": {},
       "cap.revoke": {},
       "state.write": { ok: true },
+      "state.list": { names: ["gh-password", "gh-user"] },
       "net.rules.get": { rules: { default: "allow", rules: [] } },
       "net.rules.set": { ok: true },
     });
@@ -161,6 +164,7 @@ describe("ConsoleApi", () => {
     await api.capGrant("agent:a", "nav@a.test");
     await api.capRevoke("agent:a", "nav@a.test");
     await api.vaultWrite("gh-password", "s3cret");
+    expect(await api.vaultList()).toEqual(["gh-password", "gh-user"]);
     await api.netRulesGet();
     await api.netRulesSet({ default: "deny", rules: [] });
     expect(calls[1].params).toEqual({ subject: "agent:a", scope: "nav@a.test" });
@@ -169,9 +173,10 @@ describe("ConsoleApi", () => {
       key: "gh-password",
       value: "s3cret",
     });
-    expect(calls[4].params).toEqual({});
-    expect(calls[5].params).toEqual({ default: "deny", rules: [] });
+    expect(calls[4].params).toEqual({ namespace: "vault" });
+    expect(calls[5].params).toEqual({});
+    expect(calls[6].params).toEqual({ default: "deny", rules: [] });
     await api.netRulesGet("p-2");
-    expect(calls[6].params).toEqual({ pid: "p-2" });
+    expect(calls[7].params).toEqual({ pid: "p-2" });
   });
 });

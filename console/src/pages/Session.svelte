@@ -8,10 +8,19 @@
     takeoverView,
     containRect,
     clickRatio,
+    pickLoginFields,
     type SnapshotElement,
     type TakeoverView,
   } from "../lib/session";
   import { listProfiles, rememberProfile } from "../lib/profiles";
+  import {
+    listCredentials,
+    matchingCredentials,
+    originMatches,
+    type CredentialProfile,
+  } from "../lib/credentials";
+  import { sortProcs, preferredPid, stateTone } from "../lib/procs";
+  import { friendlyError } from "../lib/errors";
 
   let { api, pulse, self }: { api: ConsoleApi; pulse: number; self: string } = $props();
 
@@ -29,18 +38,25 @@
   let profileChoice = $state<string>(listProfiles()[0] ?? "");
   let newProfile = $state("");
   let spawning = $state(false);
+  let credentials = $state<CredentialProfile[]>(listCredentials());
+  let credentialChoice = $state("");
 
   const view = $derived<TakeoverView>(takeoverView(holder, self));
-  const procState = $derived(procs.find((p) => p.pid === pid)?.state ?? null);
+  const proc = $derived(procs.find((p) => p.pid === pid) ?? null);
+  const procState = $derived(proc?.state ?? null);
+  const matchedCredentials = $derived(matchingCredentials(proc?.url, credentials));
+  const selectedCredential = $derived(
+    matchedCredentials.find((c) => c.id === credentialChoice) ?? matchedCredentials[0] ?? null,
+  );
   // 实际用于 spawn 的 profile 名：新建时取输入框，否则取下拉选中项（空=默认空白会话）。
   const effProfile = $derived(profileChoice === NEW_PROFILE ? newProfile.trim() : profileChoice.trim());
 
   async function refreshProcs() {
     try {
-      procs = await api.procList();
-      if (!pid && procs.length > 0) pid = procs[0].pid;
+      procs = sortProcs(await api.procList());
+      if (!pid && procs.length > 0) pid = preferredPid(procs);
     } catch (e) {
-      error = message(e);
+      error = friendlyError(e);
     }
   }
 
@@ -61,14 +77,10 @@
       pid = newPid;
       error = null;
     } catch (e) {
-      error = message(e);
+      error = friendlyError(e);
     } finally {
       spawning = false;
     }
-  }
-
-  function message(e: unknown): string {
-    return e instanceof Error ? e.message : String(e);
   }
 
   async function captureFrame() {
@@ -77,7 +89,7 @@
       frame = await api.screenshot(pid);
       error = null;
     } catch (e) {
-      error = message(e);
+      error = friendlyError(e);
     }
   }
 
@@ -87,7 +99,7 @@
       elements = interactive(parseSnapshotText(await api.snapshotText(pid)));
       error = null;
     } catch (e) {
-      error = message(e);
+      error = friendlyError(e);
     }
   }
 
@@ -97,7 +109,7 @@
       holder = self;
       error = null;
     } catch (e) {
-      error = message(e);
+      error = friendlyError(e, "act.takeover.start");
     }
   }
 
@@ -107,7 +119,7 @@
       holder = null;
       error = null;
     } catch (e) {
-      error = message(e);
+      error = friendlyError(e, "act.takeover.end");
     }
   }
 
@@ -119,11 +131,33 @@
       error = null;
       await Promise.all([captureFrame(), refreshSnapshot()]);
     } catch (e) {
-      error = message(e);
+      error = friendlyError(e);
     }
   }
 
-  /** 直接点击画面（仅接管中生效）：把点击偏移换算成归一化坐标 → act.point.click。 */
+  async function fillCredential(c: CredentialProfile | null) {
+    if (!c) return;
+    if (!proc?.url || !originMatches(c.origin, proc.url)) {
+      error = "当前页面 origin 与凭据绑定不匹配";
+      return;
+    }
+    const fields = pickLoginFields(elements);
+    if (!fields.username?.ref || !fields.password?.ref) {
+      error = "未找到可填充的用户名/密码输入框，请刷新元素或手动选择字段";
+      return;
+    }
+    try {
+      await api.actTypeVault(pid, fields.username.ref, c.usernameRef);
+      await api.actTypeVault(pid, fields.password.ref, c.passwordRef);
+      error = null;
+      await Promise.all([captureFrame(), refreshSnapshot(), refreshProcs()]);
+    } catch (e) {
+      error = friendlyError(e, "act.type");
+    }
+  }
+
+  /** 直接点击画面（仅接管中生效）：把点击偏移换算成归一化坐标 → act.point.click。
+   *  旧版守护进程没有该方法，friendlyError 会给出升级提示而非裸 "method not found"。 */
   async function pointClick(ev: MouseEvent) {
     if (view.kind !== "held-by-me") return;
     const img = ev.currentTarget as HTMLImageElement;
@@ -135,7 +169,7 @@
       error = null;
       await Promise.all([captureFrame(), refreshSnapshot()]);
     } catch (e) {
-      error = message(e);
+      error = friendlyError(e, "act.point.click");
     }
   }
 
@@ -144,7 +178,7 @@
       await api.actPress(pid, "Enter");
       await Promise.all([captureFrame(), refreshSnapshot()]);
     } catch (e) {
-      error = message(e);
+      error = friendlyError(e);
     }
   }
 
@@ -152,9 +186,9 @@
     if (!gotoUrl.trim()) return;
     try {
       await api.navGoto(pid, gotoUrl.trim());
-      await Promise.all([captureFrame(), refreshSnapshot()]);
+      await Promise.all([captureFrame(), refreshSnapshot(), refreshProcs()]);
     } catch (e) {
-      error = message(e);
+      error = friendlyError(e);
     }
   }
 
@@ -169,8 +203,17 @@
     if (pid) {
       frame = null;
       holder = null;
+      credentials = listCredentials();
       captureFrame();
       refreshSnapshot();
+    }
+  });
+
+  $effect(() => {
+    if (matchedCredentials.length === 0) {
+      credentialChoice = "";
+    } else if (!matchedCredentials.some((c) => c.id === credentialChoice)) {
+      credentialChoice = matchedCredentials[0].id;
     }
   });
 
@@ -184,7 +227,23 @@
 </script>
 
 <div class="section-head">
-  <h2>Session</h2>
+  {#if proc}
+    <span class="tag {stateTone(proc.state)}">{proc.state}</span>
+  {/if}
+  <span class="spacer"></span>
+  {#if view.kind === "held-by-me"}
+    <span class="tag warn">接管中 · {self}</span>
+    <button class="primary" onclick={release} data-testid="release">归还控制</button>
+  {:else if view.kind === "held-by-other"}
+    <span class="tag danger">被 {view.holder} 接管</span>
+  {:else}
+    <button class="primary" disabled={!pid || procState !== "running"} onclick={takeover} data-testid="takeover">
+      接管
+    </button>
+  {/if}
+</div>
+
+<div class="toolbar">
   <select class="profile-in" bind:value={profileChoice} data-testid="spawn-profile" title="选择要复用登录态的 profile">
     <option value="">（默认·空白）</option>
     {#each knownProfiles as p (p)}
@@ -214,17 +273,6 @@
     {/each}
   </select>
   <label class="check"><input type="checkbox" bind:checked={live} /> 实时</label>
-  <span class="spacer"></span>
-  {#if view.kind === "held-by-me"}
-    <span class="tag warn">接管中 · {self}</span>
-    <button class="primary" onclick={release} data-testid="release">归还控制</button>
-  {:else if view.kind === "held-by-other"}
-    <span class="tag danger">被 {view.holder} 接管</span>
-  {:else}
-    <button class="primary" disabled={!pid || procState !== "running"} onclick={takeover} data-testid="takeover">
-      接管
-    </button>
-  {/if}
 </div>
 
 {#if error}
@@ -261,7 +309,7 @@
         <div class="empty">等待帧…（挂起/终止的进程无画面）</div>
       {/if}
       <div class="toolbar">
-        <input placeholder="https://…" bind:value={gotoUrl} data-testid="goto-url" />
+        <input placeholder="https://…" bind:value={gotoUrl} data-testid="goto-url" style="flex:1; min-width:180px" />
         <button onclick={goto} disabled={view.kind === "held-by-other"}>导航</button>
         <button onclick={pressEnter} disabled={view.kind === "held-by-other"}>⏎ Enter</button>
       </div>
@@ -269,37 +317,72 @@
 
     <div class="card">
       <h3>输入注入 <small class="muted">语义元素 → act.*</small></h3>
+      {#if matchedCredentials.length}
+        <div class="toolbar credential-fill">
+          <select
+            bind:value={credentialChoice}
+            data-testid="credential-choice"
+            title="当前页面 origin 命中的凭据绑定"
+          >
+            {#each matchedCredentials as c (c.id)}
+              <option value={c.id}>{c.label} · {c.origin}</option>
+            {/each}
+          </select>
+          <button
+            class="primary"
+            onclick={() => fillCredential(selectedCredential)}
+            disabled={view.kind === "held-by-other"}
+            data-testid="credential-fill"
+          >
+            填入凭据
+          </button>
+          {#if selectedCredential?.loginUrl}
+            <button
+              onclick={() => {
+                gotoUrl = selectedCredential.loginUrl ?? "";
+                goto();
+              }}
+              disabled={view.kind === "held-by-other"}
+              data-testid="credential-login-url"
+            >
+              打开登录页
+            </button>
+          {/if}
+        </div>
+      {/if}
       <div class="toolbar">
-        <input placeholder="Type 文本…" bind:value={typeText} data-testid="type-text" />
+        <input placeholder="Type 文本…" bind:value={typeText} data-testid="type-text" style="flex:1; min-width:160px" />
         <button onclick={refreshSnapshot}>刷新元素</button>
       </div>
       {#if elements.length === 0}
         <div class="empty">无可交互元素</div>
       {:else}
-        <table>
-          <thead><tr><th>元素</th><th>ref</th><th></th></tr></thead>
-          <tbody>
-            {#each elements as el (el.ref)}
-              <tr>
-                <td style="padding-left: {el.depth * 12}px">
-                  <span class="tag info">{el.role}</span> {el.name}
-                  {#if el.value}<small class="muted">= {el.value}</small>{/if}
-                </td>
-                <td class="mono">{el.ref}</td>
-                <td class="row-actions">
-                  <button onclick={() => inject("click", el)} disabled={view.kind === "held-by-other"}>
-                    Click
-                  </button>
-                  {#if acceptsText(el.role)}
-                    <button onclick={() => inject("type", el)} disabled={view.kind === "held-by-other"}>
-                      Type
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>元素</th><th>ref</th><th></th></tr></thead>
+            <tbody>
+              {#each elements as el (el.ref)}
+                <tr>
+                  <td style="padding-left: {10 + el.depth * 12}px">
+                    <span class="tag info">{el.role}</span> {el.name}
+                    {#if el.value}<small class="muted">= {el.value}</small>{/if}
+                  </td>
+                  <td class="mono">{el.ref}</td>
+                  <td class="row-actions">
+                    <button onclick={() => inject("click", el)} disabled={view.kind === "held-by-other"}>
+                      Click
                     </button>
-                  {/if}
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
+                    {#if acceptsText(el.role)}
+                      <button onclick={() => inject("type", el)} disabled={view.kind === "held-by-other"}>
+                        Type
+                      </button>
+                    {/if}
+                  </td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
       {/if}
     </div>
   </div>

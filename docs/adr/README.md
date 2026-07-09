@@ -15,3 +15,4 @@
 | [0008](0008-p3-os-semantics-abi.md) | P3 OS 语义 ABI 面（suspend/snapshot/quota/wf） | Accepted |
 | [0009](0009-p4-takeover-replay-mcp.md) | P4 ABI 增量 — 人工接管、回放导出与 MCP 投影落地 | Accepted |
 | [0010](0010-takeover-point-click.md) | 接管期间坐标点击（`act.point.click`） | Accepted |
+| [0011](0011-profile-state-inspect-delete.md) | 导入状态（profiles）与 vault 凭据的可观察与可删除（`state.delete` + 隐私摘要） | Accepted |

@@ -55,6 +55,9 @@ methods! {
     STATE_LIST = "state.list";
     STATE_EXPORT = "state.export";
     STATE_IMPORT = "state.import";
+    /// 删除已导入的 profile 状态（整个 profile 或单条 entry）或 vault 凭据
+    /// （ADR-0011）。只删存储，不触碰运行中的进程；值永不出现在参数或返回里。
+    STATE_DELETE = "state.delete";
     // net — 网络
     NET_RULES_SET = "net.rules.set";
     NET_RULES_GET = "net.rules.get";

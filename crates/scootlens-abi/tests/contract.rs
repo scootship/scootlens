@@ -346,6 +346,7 @@ fn sensitive_scope_set() {
     for s in [
         "js:exec@x.test",
         "state:read:cookies@a.b",
+        "state:delete:profiles",
         "cap:admin",
         "vault:use",
         "act:takeover",

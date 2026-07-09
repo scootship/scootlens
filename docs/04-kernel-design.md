@@ -47,6 +47,7 @@ stateDiagram-v2
 
 - 后端：**P2 为文件系统**——vault（ChaCha20-Poly1305 加密文件 + `0600` 密钥）、downloads/uploads 沙箱目录、cookie/storage 经引擎 `export_state`/`import_state` 桥接；SQLite 元数据与平台 keyring 为后续演进
 - P3 新增两个目录：`snapshots/`（proc.snapshot 的内容寻址文档，键为 sha256 前缀且白名单校验）与 `profiles/`（state.import 的合并状态，名字 `[A-Za-z0-9][A-Za-z0-9._-]*` 白名单防穿越）；无 state_dir 时退化为内存模式（测试/嵌入）
+- profiles 与 vault 的可观察与可删除（ADR-0011）：`state.list` 列名、`state.read` 回元数据摘要（entry 键名/cookie 域与标志/值字节数，**值绝不回流**——导入的 cookie 是登录凭据，与 vault 只列名同一原则）、`state.delete` 整删或按 entry 单删（只清存储，运行中的进程不受影响）；vault 凭据同样可按名删除，且删除**不回收**出口脱敏登记（历史 journal 与引擎侧可能仍有痕迹）
 - uploads 沙箱：`act.upload` 的路径经 `canonicalize` + 前缀校验限制在 `<state-dir>/uploads/` 内，越界返回 `E_INVALID_ARG`（防目录穿越）
 - **vault 解引用**只发生在驱动注入输入的瞬间，值不落 journal、不落 trace、不回传
 

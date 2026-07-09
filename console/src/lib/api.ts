@@ -53,6 +53,17 @@ export interface NetLogEntry {
   [k: string]: unknown;
 }
 
+/** profile entry 的隐私摘要（state.read namespace=profiles；值绝不回流，ADR-0011）。 */
+export interface ProfileEntryDigest {
+  key: string;
+  kind: "cookie" | "storage" | "other";
+  value_bytes: number;
+  domain?: string;
+  path?: string;
+  secure?: boolean;
+  httpOnly?: boolean;
+}
+
 /** 只读取数组字段，容错非数组。 */
 function asArray(v: unknown, key: string): unknown[] {
   if (v && typeof v === "object" && Array.isArray((v as Record<string, unknown>)[key])) {
@@ -198,10 +209,35 @@ export class ConsoleApi {
     return asArray(r, "names") as string[];
   }
 
+  /** 删除一条 vault 凭据（state.delete，🔒）。历史 journal 的脱敏不回收。 */
+  vaultDelete(name: string): Promise<unknown> {
+    return this.client.call("state.delete", { namespace: "vault", key: name });
+  }
+
   /** 把登录会话（cookie + localStorage）导入 profile，后续 spawn 该 profile 即带登录态。
    *  state.import 是敏感操作（🔒）：admin 令牌自动放行，普通令牌会进 Approvals 待批。 */
   stateImport(profile: string, bundle: unknown): Promise<unknown> {
     return this.client.call("state.import", { profile, state: bundle });
+  }
+
+  /** 内核里已导入的 profile 名（state.list namespace=profiles，只有名字）。 */
+  async profileList(): Promise<string[]> {
+    const r = await this.client.call("state.list", { namespace: "profiles" });
+    return asArray(r, "names") as string[];
+  }
+
+  /** profile 内容的隐私摘要：entry 键名、cookie 的域/标志、值字节数——
+   *  值绝不回流（ADR-0011）。敏感操作（🔒）。 */
+  async profileDigest(name: string): Promise<ProfileEntryDigest[]> {
+    const r = await this.client.call("state.read", { namespace: "profiles", key: name });
+    return asArray(r, "entries") as ProfileEntryDigest[];
+  }
+
+  /** 删除整个 profile（缺省）或其中单条 entry（state.delete，🔒）。 */
+  profileDelete(name: string, entry?: string): Promise<unknown> {
+    const params: Record<string, unknown> = { namespace: "profiles", key: name };
+    if (entry) params.entry = entry;
+    return this.client.call("state.delete", params);
   }
 
   /** 导出运行中会话的完整状态束（cookies + storage）；配合 stateImport

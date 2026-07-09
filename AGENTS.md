@@ -26,3 +26,15 @@ JWT 库测试无效签名被拒绝，性质完全相同。
 - 内核只依赖 HAL trait，驱动在二进制层组装（依赖规则见 `docs/02-architecture.md`）
 - 安全模型：`docs/06-security-model.md`；路线图与验收门禁：`docs/09-roadmap.md`
 - 常用命令：`cargo test --workspace`、`cargo clippy --workspace`、`cargo fmt`
+
+## 硬性规定：验收矩阵（Capability Coverage Matrix）
+
+`docs/09-roadmap.md` 维护业务能力覆盖矩阵，以下规则**不可协商**，与 TDD、覆盖率 ≥80% 同级：
+
+1. 每个一级功能至少有一条 Happy Path E2E
+2. 每个高风险功能至少覆盖一条失败路径（enforcement 拒绝路径）
+3. 每个涉及权限的功能至少验证两种角色（授权通过 + 无令牌/越权被拒）
+4. 每个会修改系统状态的操作至少验证一次失败后的恢复或回滚
+5. 每次新增一级业务功能，必须在同一 PR 同步新增对应的 E2E，并更新矩阵表
+
+改动涉及新增/修改一级功能时，先对照矩阵补齐缺口，再动业务代码。

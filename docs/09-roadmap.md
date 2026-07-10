@@ -10,6 +10,36 @@ flowchart LR
 
 ---
 
+## 验收矩阵（Capability Coverage Matrix）— 硬性规定
+
+所有阶段门禁的**前置条件**：任一阶段的验收门禁勾选前，该阶段交付的能力必须先满足
+下面五条覆盖规则。这是硬性规定，与 TDD / 覆盖率 ≥80% 同级，CI 与评审共同把关。
+
+**覆盖规则（每条都是必须，不是建议）**
+
+1. **每个一级功能至少有一条 Happy Path E2E**（`proc`、`nav/view/act`、`cap`、`state`、`net`、`evt`、`obs`、workflow、Console、MCP 各算一个一级功能域）
+2. **每个高风险功能至少覆盖一条失败路径**（enforcement suite 拒绝路径：断言内核返回 `E_CAP_DENIED` 等错误；见 `docs/06-security-model.md` T1-T5）
+3. **每个涉及权限的功能至少验证两种角色**：授权令牌通过 + 无令牌/越权作用域令牌被拒绝
+4. **每个会修改系统状态的操作至少验证一次失败后的恢复或回滚**（如崩溃后 Crashed 标记与事件广播、snapshot/restore 往返、审批拒绝后状态不变）
+5. **每次新增一级业务功能，必须在同一 PR 同步新增对应的 E2E**——没有 E2E 的一级功能不允许合并
+
+**当前覆盖矩阵**（新增一级功能时同步更新此表）
+
+| 一级功能域 | Happy Path E2E | 失败路径 | 权限双角色 | 恢复/回滚 |
+|---|---|---|---|---|
+| proc（进程生命周期） | `scootlensd/tests/e2e.rs` | `kernel/tests/kernel.rs`（崩溃路径） | `kernel/tests/enforcement.rs` | kill -9 → Crashed + 事件广播 |
+| nav/view/act（导航与交互） | `scootlensd/tests/e2e.rs`（登录表单场景） | `kernel/tests/dispatch.rs` | `kernel/tests/enforcement.rs` | n/a（只读/幂等为主） |
+| cap（令牌与审批） | `kernel/tests/dispatch_p2.rs` | `kernel/tests/enforcement.rs`（穷举 `E_CAP_DENIED`） | 授权 vs 越权作用域 | 审批拒绝 → 状态不变 |
+| state（VFS/vault） | `kernel/tests/dispatch_p2.rs` | vault 零泄漏自动扫描 | `kernel/tests/enforcement.rs` | export/import 往返 |
+| net（出口规则） | `kernel/tests/dispatch_p2.rs` | blocked/unlisted 域名被拒 | `kernel/tests/enforcement.rs` | n/a |
+| evt/obs（事件与审计） | `kernel/tests/dispatch*.rs` | journal 哈希链验链失败检测 | `kernel/tests/enforcement.rs` | 回放包离线验链 |
+| snapshot/restore + workflow | `kernel/tests/dispatch_p3.rs` | 配额超限处置 | 最小权限令牌 | snapshot → kill → restore 会话仍有效 |
+| Console | `console/`（Playwright e2e） | 未登录访问被拒 | admin vs 受限令牌 | 接管归还后事件序列正确 |
+| MCP | `scootlens-mcp/tests/mcp_e2e.rs` | 越权工具调用被内核拒绝 | 受限令牌 vs 敏感作用域需审批 | 审批挂起 → 批准/拒绝分支 |
+| gateway（认证入口） | `gateway/tests/ws.rs` | `gateway/tests/auth.rs`（无效凭据拒绝） | 令牌 vs 用户名密码 vs 匿名 | n/a |
+
+---
+
 ## Phase 0 · 地基（1-2 周）
 
 **目标**：让所有铁律从第一行业务代码之前就生效。

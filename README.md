@@ -168,9 +168,10 @@ fixtures/               # e2e 测试站点
 
 1. **TDD** —— 先写测试，红→绿→重构；bugfix 必须先有复现测试
 2. **覆盖率 ≥ 80%** —— 每个 crate 行覆盖率 CI 强制
-3. **严格模块边界** —— 单向依赖规则，CI 拦截违例
-4. **分阶段交付** —— 按 [路线图](docs/09-roadmap.md) 阶段推进，禁止偷跑
-5. **`unsafe_code = "forbid"`** —— 全 workspace 禁用 unsafe
+3. **验收矩阵** —— 按 [路线图的 Capability Coverage Matrix](docs/09-roadmap.md#验收矩阵capability-coverage-matrix--硬性规定) 覆盖：每个一级功能有 Happy Path E2E、高风险功能有失败路径、权限功能验证两种角色、状态变更操作验证恢复/回滚；新增一级功能必须同 PR 附 E2E
+4. **严格模块边界** —— 单向依赖规则，CI 拦截违例
+5. **分阶段交付** —— 按 [路线图](docs/09-roadmap.md) 阶段推进，禁止偷跑
+6. **`unsafe_code = "forbid"`** —— 全 workspace 禁用 unsafe
 
 提交前请本地过一遍：
 

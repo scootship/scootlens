@@ -1,8 +1,8 @@
 <script lang="ts">
-  import type { ConsoleApi } from "../lib/api";
+  import type { ConsoleApi, ProfileEntryDigest } from "../lib/api";
   import { scopeLabel } from "../lib/format";
   import { buildStateBundle } from "../lib/cookies";
-  import { listProfiles, rememberProfile } from "../lib/profiles";
+  import { forgetProfile, listProfiles, rememberProfile } from "../lib/profiles";
   import {
     forgetCredential,
     listCredentials,
@@ -13,12 +13,13 @@
 
   let { api, pulse }: { api: ConsoleApi; pulse: number } = $props();
 
-  type SubTab = "tokens" | "network" | "vault" | "session";
+  type SubTab = "tokens" | "network" | "vault" | "bindings" | "session";
   let sub = $state<SubTab>("tokens");
   const SUBTABS: { id: SubTab; label: string }[] = [
     { id: "tokens", label: "令牌 / 权限" },
     { id: "network", label: "网络规则" },
     { id: "vault", label: "凭据 Vault" },
+    { id: "bindings", label: "站点绑定" },
     { id: "session", label: "登录会话" },
   ];
 
@@ -40,6 +41,11 @@
   let importCookies = $state("");
   let importStorage = $state("");
   let knownProfiles = $state<string[]>(listProfiles());
+  /** 内核侧权威列表（state.list namespace=profiles）。 */
+  let importedProfiles = $state<string[]>([]);
+  /** 当前展开摘要的 profile；digest 只含元数据，值永不回流。 */
+  let digestFor = $state<string | null>(null);
+  let digest = $state<ProfileEntryDigest[]>([]);
   let notice = $state<string | null>(null);
   let error = $state<string | null>(null);
 
@@ -63,6 +69,13 @@
         vaultNames = await api.vaultList();
       } catch {
         vaultNames = [];
+      }
+      try {
+        importedProfiles = await api.profileList();
+        // 内核列表并入本地记忆，让「新开会话」下拉总能看到已导入的 profile
+        for (const p of importedProfiles) knownProfiles = rememberProfile(p);
+      } catch {
+        importedProfiles = [];
       }
       error = null;
     } catch (e) {
@@ -106,6 +119,15 @@
       vaultSecret = "";
       vaultName = "";
     }, `凭据已写入 vault（只写不读）`);
+  }
+
+  /** 删除 vault 凭据（值从未回流过；历史 journal 的脱敏不回收）。 */
+  function deleteVaultName(name: string) {
+    act(async () => {
+      await api.vaultDelete(name);
+      vaultNames = await api.vaultList().catch(() => vaultNames.filter((n) => n !== name));
+      if (vaultRef === name) vaultRef = null;
+    }, `已删除凭据「${name}」`);
   }
 
   function saveCredentialProfile() {
@@ -164,6 +186,43 @@
       importStorage = "";
       return { cookies, httpOnly, storage };
     }, `已导入 profile「${importProfile.trim()}」→ 去 Session 页从下拉选此 profile 点「新开会话」，即带登录态并可接管`);
+  }
+
+  /** 查看 profile 摘要（state.read 只回元数据，值绝不回流）。 */
+  async function viewProfile(name: string) {
+    notice = null;
+    error = null;
+    if (digestFor === name) {
+      digestFor = null;
+      digest = [];
+      return;
+    }
+    try {
+      digest = await api.profileDigest(name);
+      digestFor = name;
+    } catch (e) {
+      error = friendlyError(e);
+    }
+  }
+
+  /** 整删 profile（只清存储，运行中的会话不受影响）。 */
+  function deleteProfile(name: string) {
+    act(async () => {
+      await api.profileDelete(name);
+      knownProfiles = forgetProfile(name);
+      if (digestFor === name) {
+        digestFor = null;
+        digest = [];
+      }
+    }, `已删除 profile「${name}」`);
+  }
+
+  /** 删除 profile 内单条 entry，并刷新摘要。 */
+  function deleteProfileEntry(name: string, entry: string) {
+    act(async () => {
+      await api.profileDelete(name, entry);
+      digest = await api.profileDigest(name).catch(() => []);
+    }, `已从「${name}」删除 ${entry}`);
   }
 
   $effect(() => {
@@ -241,84 +300,101 @@
     </div>
   </div>
 {:else if sub === "vault"}
-  <div class="settings-grid">
-    <div class="card">
-      <h3>写入凭据 <small class="muted">state.write · namespace=vault</small></h3>
-      <p class="card-desc">
-        单向保险库：写入后不可读回，Agent 只能经 <code>vault_ref</code> 句柄在
-        受控动作里引用（如表单填充），明文永不回流。
-      </p>
-      <div class="form-col">
-        <label class="field">
-          <span class="field-label">凭据名</span>
-          <input placeholder="如 gh-password" bind:value={vaultName} data-testid="vault-name" />
-        </label>
-        <label class="field">
-          <span class="field-label">凭据值</span>
-          <input class="token" style="width:100%" type="password" placeholder="写入后不可读回" bind:value={vaultSecret} data-testid="vault-secret" />
-        </label>
-        <div class="toolbar" style="margin:2px 0 0">
-          <button class="primary" onclick={writeVault} data-testid="vault-write">写入 vault</button>
-          {#if vaultRef}
-            <span class="tag ok mono" data-testid="vault-ref">vault_ref: {vaultRef}</span>
-          {/if}
-        </div>
+  <div class="card" style="max-width:720px">
+    <h3>写入凭据 <small class="muted">state.write · namespace=vault</small></h3>
+    <p class="card-desc">
+      单向保险库：写入后不可读回，Agent 只能经 <code>vault_ref</code> 句柄在
+      受控动作里引用（如表单填充），明文永不回流。
+    </p>
+    <div class="form-col">
+      <label class="field">
+        <span class="field-label">凭据名</span>
+        <input placeholder="如 gh-password" bind:value={vaultName} data-testid="vault-name" />
+      </label>
+      <label class="field">
+        <span class="field-label">凭据值</span>
+        <input class="token" style="width:100%" type="password" placeholder="写入后不可读回" bind:value={vaultSecret} data-testid="vault-secret" />
+      </label>
+      <div class="toolbar" style="margin:2px 0 0">
+        <button class="primary" onclick={writeVault} data-testid="vault-write">写入 vault</button>
+        {#if vaultRef}
+          <span class="tag ok mono" data-testid="vault-ref">vault_ref: {vaultRef}</span>
+        {/if}
       </div>
     </div>
-
-    <div class="card">
-      <h3>站点凭据绑定 <small class="muted">origin → vault_ref</small></h3>
-      <p class="card-desc">
-        保存域名与 vault 句柄的绑定；Session 页只在当前 URL 命中该 origin 时显示填充动作。
-      </p>
-      <div class="form-col">
-        <label class="field">
-          <span class="field-label">名称</span>
-          <input placeholder="如 GitHub 主账号" bind:value={credentialLabel} data-testid="credential-label" />
-        </label>
-        <label class="field">
-          <span class="field-label">域名 / origin</span>
-          <input placeholder="如 github.com 或 *.corp.test" bind:value={credentialOrigin} data-testid="credential-origin" />
-        </label>
-        <label class="field">
-          <span class="field-label">用户名 vault_ref</span>
-          <input
-            class="mono"
-            placeholder="如 gh-username"
-            bind:value={credentialUsernameRef}
-            list="vault-names"
-            data-testid="credential-username-ref"
-          />
-        </label>
-        <label class="field">
-          <span class="field-label">密码 vault_ref</span>
-          <input
-            class="mono"
-            placeholder="如 gh-password"
-            bind:value={credentialPasswordRef}
-            list="vault-names"
-            data-testid="credential-password-ref"
-          />
-        </label>
-        <label class="field">
-          <span class="field-label">登录页 URL（可选）</span>
-          <input placeholder="https://github.com/login" bind:value={credentialLoginUrl} data-testid="credential-login-url" />
-        </label>
-        {#if vaultNames.length}
-          <datalist id="vault-names">
-            {#each vaultNames as n (n)}
-              <option value={n}></option>
-            {/each}
-          </datalist>
-        {/if}
-        <div class="toolbar" style="margin:2px 0 0">
-          <button class="primary" onclick={saveCredentialProfile} data-testid="credential-save">保存绑定</button>
-        </div>
+    {#if vaultNames.length}
+      <table style="margin-top:12px" data-testid="vault-table">
+        <thead>
+          <tr><th>已存凭据（只列名，值不可读回）</th><th style="width:1%"></th></tr>
+        </thead>
+        <tbody>
+          {#each vaultNames as n (n)}
+            <tr>
+              <td class="mono">{n}</td>
+              <td class="row-actions">
+                <button class="danger" onclick={() => deleteVaultName(n)} data-testid="vault-delete-{n}">
+                  删除
+                </button>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    {/if}
+  </div>
+{:else if sub === "bindings"}
+  <div class="card" style="max-width:720px">
+    <h3>站点凭据绑定 <small class="muted">origin → vault_ref</small></h3>
+    <p class="card-desc">
+      保存域名与 vault 句柄的绑定；Session 页只在当前 URL 命中该 origin 时显示填充动作。
+    </p>
+    <div class="form-col">
+      <label class="field">
+        <span class="field-label">名称</span>
+        <input placeholder="如 GitHub 主账号" bind:value={credentialLabel} data-testid="credential-label" />
+      </label>
+      <label class="field">
+        <span class="field-label">域名 / origin</span>
+        <input placeholder="如 github.com 或 *.corp.test" bind:value={credentialOrigin} data-testid="credential-origin" />
+      </label>
+      <label class="field">
+        <span class="field-label">用户名 vault_ref</span>
+        <input
+          class="mono"
+          placeholder="如 gh-username"
+          bind:value={credentialUsernameRef}
+          list="vault-names"
+          data-testid="credential-username-ref"
+        />
+      </label>
+      <label class="field">
+        <span class="field-label">密码 vault_ref</span>
+        <input
+          class="mono"
+          placeholder="如 gh-password"
+          bind:value={credentialPasswordRef}
+          list="vault-names"
+          data-testid="credential-password-ref"
+        />
+      </label>
+      <label class="field">
+        <span class="field-label">登录页 URL（可选）</span>
+        <input placeholder="https://github.com/login" bind:value={credentialLoginUrl} data-testid="credential-login-url" />
+      </label>
+      {#if vaultNames.length}
+        <datalist id="vault-names">
+          {#each vaultNames as n (n)}
+            <option value={n}></option>
+          {/each}
+        </datalist>
+      {/if}
+      <div class="toolbar" style="margin:2px 0 0">
+        <button class="primary" onclick={saveCredentialProfile} data-testid="credential-save">保存绑定</button>
       </div>
     </div>
   </div>
 
-  <div class="card" style="margin-top:14px">
+  <div class="card" style="max-width:720px; margin-top:14px">
     <h3>已保存绑定</h3>
     {#if credentials.length === 0}
       <div class="empty">暂无凭据绑定</div>
@@ -417,6 +493,76 @@
       </p>
     </div>
   </div>
+
+  <div class="card" style="max-width:720px; margin-top:14px">
+    <h3>已导入的 profiles <small class="muted">state.list / state.read / state.delete · namespace=profiles</small></h3>
+    <p class="card-desc">
+      导入的 cookie 是登录凭据，这里只展示<b>元数据</b>（名字/域/标志/字节数），
+      值永不回流——与 vault 只列名同一原则。删除只清 profile 存储，
+      运行中的会话不受影响。
+    </p>
+    {#if importedProfiles.length === 0}
+      <div class="empty" data-testid="profiles-empty">内核里还没有已导入的 profile</div>
+    {:else}
+      <table data-testid="profiles-table">
+        <thead>
+          <tr><th>profile</th><th style="width:1%"></th></tr>
+        </thead>
+        <tbody>
+          {#each importedProfiles as p (p)}
+            <tr>
+              <td class="mono">{p}</td>
+              <td class="row-actions">
+                <button onclick={() => viewProfile(p)} data-testid="profile-view-{p}">
+                  {digestFor === p ? "收起" : "查看"}
+                </button>
+                <button class="danger" onclick={() => deleteProfile(p)} data-testid="profile-delete-{p}">
+                  删除
+                </button>
+              </td>
+            </tr>
+            {#if digestFor === p}
+              <tr>
+                <td colspan="2">
+                  {#if digest.length === 0}
+                    <div class="empty">（空 profile）</div>
+                  {:else}
+                    <table class="digest" data-testid="profile-digest">
+                      <thead>
+                        <tr><th>entry</th><th>域</th><th>标志</th><th>值</th><th style="width:1%"></th></tr>
+                      </thead>
+                      <tbody>
+                        {#each digest as e (e.key)}
+                          <tr>
+                            <td class="mono">{e.key}</td>
+                            <td class="mono">{e.domain ?? "—"}</td>
+                            <td>
+                              {#if e.httpOnly}<span class="tag info">httpOnly</span>{/if}
+                              {#if e.secure}<span class="tag info">secure</span>{/if}
+                            </td>
+                            <td class="mono muted">•••（{e.value_bytes} B）</td>
+                            <td class="row-actions">
+                              <button
+                                class="danger"
+                                onclick={() => deleteProfileEntry(p, e.key)}
+                                data-testid="profile-entry-delete-{e.key}"
+                              >
+                                删除
+                              </button>
+                            </td>
+                          </tr>
+                        {/each}
+                      </tbody>
+                    </table>
+                  {/if}
+                </td>
+              </tr>
+            {/if}
+          {/each}
+        </tbody>
+      </table>
+    {/if}
+  </div>
 {/if}
 
 <style>
@@ -441,5 +587,10 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
+  }
+
+  /* profile 摘要的嵌套表格：与外层行区分开 */
+  table.digest {
+    margin: 6px 0;
   }
 </style>

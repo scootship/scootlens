@@ -179,4 +179,61 @@ describe("ConsoleApi", () => {
     await api.netRulesGet("p-2");
     expect(calls[7].params).toEqual({ pid: "p-2" });
   });
+
+  it("profile list/digest/delete carry exact params (values never requested back)", async () => {
+    const { api, calls } = stub({
+      "state.list": { names: ["shop", "mail"] },
+      "state.read": {
+        profile: "shop",
+        entries: [
+          {
+            key: "cookie:sessionid",
+            kind: "cookie",
+            value_bytes: 24,
+            domain: ".shop.test",
+            httpOnly: true,
+            secure: true,
+          },
+        ],
+      },
+      "state.delete": { ok: true, deleted: 1 },
+    });
+    expect(await api.profileList()).toEqual(["shop", "mail"]);
+    expect(calls[0]).toEqual({ method: "state.list", params: { namespace: "profiles" } });
+
+    const digest = await api.profileDigest("shop");
+    expect(digest).toHaveLength(1);
+    expect(digest[0].key).toBe("cookie:sessionid");
+    expect(digest[0].value_bytes).toBe(24);
+    expect(calls[1]).toEqual({
+      method: "state.read",
+      params: { namespace: "profiles", key: "shop" },
+    });
+
+    await api.profileDelete("shop");
+    expect(calls[2]).toEqual({
+      method: "state.delete",
+      params: { namespace: "profiles", key: "shop" },
+    });
+    await api.profileDelete("shop", "cookie:sessionid");
+    expect(calls[3]).toEqual({
+      method: "state.delete",
+      params: { namespace: "profiles", key: "shop", entry: "cookie:sessionid" },
+    });
+  });
+
+  it("profileList/profileDigest tolerate missing arrays", async () => {
+    const { api } = stub({ "state.list": {}, "state.read": {} });
+    expect(await api.profileList()).toEqual([]);
+    expect(await api.profileDigest("ghost")).toEqual([]);
+  });
+
+  it("vaultDelete targets the vault namespace by name", async () => {
+    const { api, calls } = stub({ "state.delete": { ok: true, deleted: 1 } });
+    await api.vaultDelete("gh-password");
+    expect(calls[0]).toEqual({
+      method: "state.delete",
+      params: { namespace: "vault", key: "gh-password" },
+    });
+  });
 });

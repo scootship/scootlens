@@ -25,6 +25,7 @@
 
 4. **确定性**：e2e 用本地自托管测试站点（fixtures），禁止依赖公网站点；禁止 sleep 等待，一律 `evt.wait`
 5. 快照/剪枝类输出使用 golden file 测试（`insta` crate）
+6. **验收矩阵**：E2E 覆盖必须满足 [09-roadmap 的 Capability Coverage Matrix](09-roadmap.md#验收矩阵capability-coverage-matrix--硬性规定)——每个一级功能有 Happy Path、高风险功能有失败路径、权限功能验证两种角色、状态变更操作验证恢复/回滚、新增一级功能同 PR 附 E2E
 
 ## 8.3 覆盖率铁律：≥ 80%
 

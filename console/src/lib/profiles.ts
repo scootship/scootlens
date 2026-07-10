@@ -1,7 +1,8 @@
 // 已导入/用过的 profile 名字，记在浏览器本地，让「新开会话」从下拉里选而不是手输。
 //
-// 内核当前没有列 profile 的 RPC（state.list 只支持 vault/downloads/cookies/storage），
-// 所以这里在 console 侧记忆本机导入过的 profile 名。纯前端，无需后端改动。
+// 内核侧的权威列表走 `state.list`（namespace=profiles，ADR-0011）；这里的
+// localStorage 记忆是补充：连不上内核时下拉仍可用，且能记住尚未导入过状态、
+// 只是 spawn 用过的名字。Settings 页加载时会把内核列表并入本地记忆。
 
 const KEY = "scootlens.profiles";
 
